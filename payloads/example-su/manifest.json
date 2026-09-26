@@ -1,0 +1,22 @@
+{
+  "name": "example-su",
+  "version": "0.1.0",
+  "arch": ["arm64", "arm", "x86_64", "x86"],
+  "min_api": 26,
+  "files": [
+    {
+      "src": "su",
+      "dest": "/su",
+      "mode": "0755",
+      "context": "u:object_r:rootfs:s0",
+      "required": true
+    }
+  ],
+  "rc": {
+    "file": "/init.veritpath.rc",
+    "import_into": ["/init.rc"],
+    "content": "# veritpath example payload\non post-fs-data\n    chmod 0755 /su\n    exec - root root -- /su --install\n\nservice veritpath-su /su --daemon\n    class late_start\n    user root\n    group root\n    seclabel u:r:init:s0\n    oneshot\n"
+  },
+  "cmdline_append": ["androidboot.veritpath=1"],
+  "selinux": "permissive"
+}

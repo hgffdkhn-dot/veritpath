@@ -22,6 +22,7 @@ static void usage(void)
     puts("  doctor    show which veritpath build is running");
     puts("");
     puts("input options:");
+    puts("  --header-version N   force a header version (0-4, diagnostics)");
     puts("  --boot FILE          boot.img");
     puts("  --init-boot FILE     init_boot.img (Android 13+)");
     puts("  --vendor-boot FILE   vendor_boot.img");
@@ -66,6 +67,7 @@ static const struct option kLongOpts[] = {
     {"json", no_argument, 0, 'j'},
     {"verbose", no_argument, 0, 'v'},
     {"help", no_argument, 0, 'h'},
+    {"header-version", required_argument, 0, 'H'},
     {0, 0, 0, 0},
 };
 
@@ -83,7 +85,7 @@ static void parse_args(int argc, char **argv, args_t *a)
     options_init(&a->opts);
     optind = 1;
     for (;;) {
-        int c = getopt_long(argc, argv, "p:o:d:B:I:V:R:c:g:F:fDnPjSvh", kLongOpts, NULL);
+        int c = getopt_long(argc, argv, "p:o:d:B:I:V:R:c:g:F:fDnPjSvhH:", kLongOpts, NULL);
         if (c == -1)
             break;
         switch (c) {
@@ -104,6 +106,7 @@ static void parse_args(int argc, char **argv, args_t *a)
         case 'D': a->opts.dry_run = 1; break;
         case 'j': a->json = 1; break;
         case 'v': vp_set_verbose(1); break;
+        case 'H': vp_forced_header_version = atoi(optarg); break;
         case 'h': usage(); exit(0);
         default: break;
         }
@@ -134,7 +137,7 @@ static int load_images(args_t *a, image_set_t *set)
         buf_t data;
         buf_init(&data);
         if (read_file(spec[i].path, &data) != 0) {
-            vp_err("cannot read %s", spec[i].path);
+            vp_report_missing(spec[i].role, spec[i].path);
             buf_free(&data);
             return -1;
         }
@@ -252,7 +255,7 @@ static int cmd_hexdump(args_t *a)
     buf_t data;
     buf_init(&data);
     if (read_file(path, &data) != 0) {
-        vp_err("cannot read %s", path);
+        vp_report_missing("payload", path);
         buf_free(&data);
         return 1;
     }
@@ -500,7 +503,7 @@ static int cmd_unpack(args_t *a)
     buf_t data;
     buf_init(&data);
     if (read_file(img_path, &data) != 0) {
-        vp_err("cannot read %s", img_path);
+        vp_report_missing("image", img_path);
         return 1;
     }
     boot_img_t img;

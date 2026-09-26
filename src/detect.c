@@ -302,7 +302,7 @@ static void print_img(const char *path, const boot_img_t *img)
     }
     if (img->dtb.len)
         printf("DTB_SZ:%zu\n", img->dtb.len);
-    printf("PAGE_SIZE:%u\n", img->page_size);
+    printf("PAGESIZE:%u\n", img->page_size);
     const char *cl = boot_img_cmdline((boot_img_t *)img);
     if (cl) {
         while (*cl == ' ')

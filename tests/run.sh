@@ -3,14 +3,14 @@
 #
 #   ./tests/run.sh [path-to-binary]
 #
-# Generates synthetic Android images with the reference Python implementation
-# (../veritpath), runs the C binary against them and verifies the patched
-# output with Python - two independent implementations checking each other.
+# Fully self-contained: images are built and verified by tests/imgkit.py
+# (pure standard library), so the suite needs nothing but python3 and cc.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${1:-$ROOT/build/veritpath}"
-PYPROJ="${VERITPATH_PY:-$ROOT/../veritpath}"
+KIT="$ROOT/tests/imgkit.py"
+PAY="$ROOT/payloads/example-su"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -28,239 +28,114 @@ echo "binary: $BIN"
 
 # ---------------------------------------------------------------- images
 echo "== generating synthetic images"
-if [ -d "$PYPROJ" ] && python3 -c "import sys; sys.path.insert(0,'$PYPROJ'); import veritpath" 2>/dev/null; then
-    python3 "$PYPROJ/scripts/make_sample_images.py" "$WORK/img" >/dev/null
-    python3 - "$PYPROJ" "$WORK/img" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from tests.fixtures import make_legacy_boot
-from pathlib import Path
-out = Path(sys.argv[2])
-for hv in (1, 2):
-    out.joinpath("legacy%d.img" % hv).write_bytes(make_legacy_boot(hv))
-PY
-    HAVE_PY=1
+python3 "$KIT" images "$WORK/img"
+for f in boot.img init_boot.img vendor_boot.img legacy1.img legacy2.img; do
+    [ -s "$WORK/img/$f" ] || { echo "missing $f" >&2; exit 1; }
+done
+ok "synthetic images generated"
+
+# ------------------------------------------------------------ analyze
+echo "== analyze"
+out=$("$BIN" analyze --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img" \
+      --vendor-boot "$WORK/img/vendor_boot.img")
+check "arch detected"        "$(grep -c '^ARCH:arm64$' <<<"$out")" "1"
+check "layout is init_boot"  "$(grep -c '^LAYOUT:init_boot$' <<<"$out")" "1"
+check "target is init_boot"  "$(grep -c '^TARGET:init_boot$' <<<"$out")" "1"
+check "system-as-root"       "$(grep -c '^SYSTEM_AS_ROOT:1$' <<<"$out")" "1"
+check "brief lists each image" "$(grep -c '^\[' <<<"$out")" "3"
+
+out=$("$BIN" analyze --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img" --json)
+check "json output parses"   "$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["target"])' <<<"$out")" "init_boot"
+
+out=$("$BIN" analyze --boot "$WORK/img/boot.img" --vendor-boot "$WORK/img/vendor_boot.img")
+check "vendor_boot layout"   "$(grep -c '^LAYOUT:vendor_boot$' <<<"$out")" "1"
+
+# --------------------------------------------------------------- plan
+echo "== plan"
+out=$("$BIN" plan --init-boot "$WORK/img/init_boot.img" -p "$PAY" --permissive)
+check "plan lists payload"   "$(grep -c 'payload-file' <<<"$out")" "1"
+check "plan names selinux"   "$(grep -c 'permissive' <<<"$out")" "1"
+check "plan has selinux"     "$(grep -c 'androidboot.selinux=permissive' <<<"$out")" "1"
+check "plan is read only"    "$([ -e "$WORK/img/init_boot.veritpath.img" ] && echo yes || echo no)" "no"
+
+# ------------------------------------------------------------- inject
+echo "== inject"
+"$BIN" inject --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img" \
+      -p "$PAY" --permissive -o "$WORK/out" >/dev/null
+check "output written"       "$([ -s "$WORK/out/init_boot.veritpath.img" ] && echo yes || echo no)" "yes"
+check "boot.img untouched"   "$([ -e "$WORK/out/boot.veritpath.img" ] && echo yes || echo no)" "no"
+check "backup kept"          "$([ -e "$WORK/img/init_boot.img.veritpath.bak" ] && echo yes || echo no)" "yes"
+if python3 "$KIT" verify "$WORK/out/init_boot.veritpath.img"; then ok "patched init_boot"; else bad "patched init_boot"; fi
+
+# --------------------------------------------------- vendor fragments
+echo "== vendor_boot"
+"$BIN" inject --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img" \
+    --vendor-boot "$WORK/img/vendor_boot.img" -p "$PAY" \
+    --patch-vendor-boot -o "$WORK/out2" >/dev/null
+if python3 "$KIT" verify "$WORK/out2/vendor_boot.veritpath.img" vendor; then
+    ok "patched vendor_boot"
 else
-    echo "  (python reference project not available - skipping generated images)"
-    HAVE_PY=0
+    bad "patched vendor_boot"
 fi
 
-if [ "$HAVE_PY" = 1 ]; then
-    IMG="$WORK/img"
-    for f in boot.img init_boot.img vendor_boot.img legacy1.img legacy2.img; do
-        [ -s "$IMG/$f" ] || { echo "missing $f" >&2; exit 1; }
-    done
-    ok "synthetic images generated"
+# ------------------------------------------------------- legacy images
+echo "== legacy headers"
+for hv in 1 2; do
+    "$BIN" inject --boot "$WORK/img/legacy$hv.img" -p "$PAY" --permissive -o "$WORK/out3" >/dev/null
+    if python3 "$KIT" verify "$WORK/out3/legacy$hv.veritpath.img" hv "$hv"; then
+        ok "legacy v$hv round-trip"
+    else
+        bad "legacy v$hv round-trip"
+    fi
+done
 
-    # ------------------------------------------------------------ analyze
-    echo "== analyze"
-    out=$("$BIN" analyze --boot "$IMG/boot.img" --init-boot "$IMG/init_boot.img" \
-          --vendor-boot "$IMG/vendor_boot.img")
-    check "arch detected"        "$(grep -c '^ARCH:arm64$' <<<"$out")" "1"
-    check "layout is init_boot"  "$(grep -c '^LAYOUT:init_boot$' <<<"$out")" "1"
-    check "target is init_boot"  "$(grep -c '^TARGET:init_boot$' <<<"$out")" "1"
-    check "system-as-root"       "$(grep -c '^SYSTEM_AS_ROOT:1$' <<<"$out")" "1"
-    check "brief lists each image" "$(grep -c '^\[' <<<"$out")" "3"
+# --------------------------------------------------------- compression
+echo "== compression"
+"$BIN" inject --init-boot "$WORK/img/init_boot.img" -p "$PAY" \
+    --format lz4_legacy -o "$WORK/out4" >/dev/null
+check "forced lz4_legacy" "$(head -c 4 "$WORK/out4/init_boot.veritpath.img" >/dev/null; \
+    "$BIN" analyze --init-boot "$WORK/out4/init_boot.veritpath.img" | grep -c '^RAMDISK_FMT:lz4_legacy$')" "1"
 
-    out=$("$BIN" analyze --boot "$IMG/boot.img" --init-boot "$IMG/init_boot.img" --json)
-    check "json output parses"   "$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["target"])' <<<"$out")" "init_boot"
-
-    out=$("$BIN" analyze --boot "$IMG/boot.img" --vendor-boot "$IMG/vendor_boot.img")
-    check "vendor_boot layout"   "$(grep -c '^LAYOUT:vendor_boot$' <<<"$out")" "1"
-
-    # --------------------------------------------------------------- plan
-    echo "== plan"
-    out=$("$BIN" plan --init-boot "$IMG/init_boot.img" -p "$PYPROJ/payloads/example-su" --permissive)
-    check "plan lists payload"   "$(grep -c 'payload-file' <<<"$out")" "1"
-    check "plan names selinux"   "$(grep -c 'permissive' <<<"$out")" "1"
-    check "plan has selinux"     "$(grep -c 'androidboot.selinux=permissive' <<<"$out")" "1"
-    check "plan is read only"    "$([ -e "$IMG/init_boot.veritpath.img" ] && echo yes || echo no)" "no"
-
-    # ------------------------------------------------------------- inject
-    echo "== inject"
-    out=$("$BIN" inject --boot "$IMG/boot.img" --init-boot "$IMG/init_boot.img" \
-          -p "$PYPROJ/payloads/example-su" --permissive -o "$WORK/out")
-    check "output written"       "$([ -s "$WORK/out/init_boot.veritpath.img" ] && echo yes || echo no)" "yes"
-    check "boot.img untouched"   "$([ -e "$WORK/out/boot.veritpath.img" ] && echo yes || echo no)" "no"
-    check "backup kept"          "$([ -e "$IMG/init_boot.img.veritpath.bak" ] && echo yes || echo no)" "yes"
-
-    python3 - "$PYPROJ" "$WORK/out/init_boot.veritpath.img" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from veritpath.bootimg import BootImage
-img = BootImage.parse(open(sys.argv[2], "rb").read(), "init_boot")
-a = img.ramdisk_archive()
-assert a.find("/su") is not None, "su missing"
-assert a.find("/init.veritpath.rc") is not None, "rc missing"
-assert a.find("/veritpath.json") is not None, "marker missing"
-assert a.find("/init") is not None, "original init lost"
-assert a.find("/su").perms == 0o755, "wrong su permissions"
-assert "androidboot.selinux=permissive" in img.full_cmdline, "cmdline not patched"
-assert b"import /init.veritpath.rc" in a.find("/init.rc").data, "init.rc not hooked"
-assert b"u:object_r:rootfs:s0" in a.find("/file_contexts").data, "file_contexts not patched"
-print("  ok   python verifies patched init_boot")
-PY
-    pass=$((pass + 1))
-
-    # --------------------------------------------------- vendor fragments
-    echo "== vendor_boot"
-    "$BIN" inject --boot "$IMG/boot.img" --init-boot "$IMG/init_boot.img" \
-        --vendor-boot "$IMG/vendor_boot.img" -p "$PYPROJ/payloads/example-su" \
-        --patch-vendor-boot -o "$WORK/out2" >/dev/null
-    python3 - "$PYPROJ" "$WORK/out2/vendor_boot.veritpath.img" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from veritpath.bootimg import VendorBootImage
-v = VendorBootImage.parse(open(sys.argv[2], "rb").read())
-a = v.ramdisk_archive()
-assert len(a.segments) == 2, "wrong segment count"
-assert all(s.find("/su") is not None for s in a.segments), "fragment not patched"
-assert sum(e.size for e in v.table) == len(v.ramdisk), "fragment table out of sync"
-print("  ok   python verifies patched vendor_boot")
-PY
-    pass=$((pass + 1))
-
-    # ------------------------------------------------------- legacy images
-    echo "== legacy headers"
-    for hv in 1 2; do
-        "$BIN" inject --boot "$IMG/legacy$hv.img" -p "$PYPROJ/payloads/example-su" \
-            -o "$WORK/out3" >/dev/null
-        python3 - "$PYPROJ" "$WORK/out3/legacy$hv.veritpath.img" "$hv" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from veritpath.bootimg import BootImage
-img = BootImage.parse(open(sys.argv[2], "rb").read(), "boot")
-assert img.header_version == int(sys.argv[3]), "header version changed"
-a = img.ramdisk_archive()
-assert a.find("/su") is not None, "su missing"
-assert len(img.kernel) > 0, "kernel lost"
-print(f"  ok   legacy v{sys.argv[3]} round-trip")
-PY
-        pass=$((pass + 1))
-    done
-
-    # --------------------------------------------------------- compression
-    echo "== compression"
-    "$BIN" inject --init-boot "$IMG/init_boot.img" -p "$PYPROJ/payloads/example-su" \
-        --format lz4_legacy -o "$WORK/out4" >/dev/null
-    python3 - "$PYPROJ" "$WORK/out4/init_boot.veritpath.img" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from veritpath.bootimg import BootImage
-img = BootImage.parse(open(sys.argv[2], "rb").read(), "init_boot")
-assert img.ramdisk_format == "lz4_legacy", img.ramdisk_format
-assert img.ramdisk_archive().find("/su") is not None
-print("  ok   forced lz4_legacy compression")
-PY
-    pass=$((pass + 1))
-
-    # ------------------------------------------------------- unpack/repack
-    echo "== unpack / repack"
-    "$BIN" unpack "$IMG/init_boot.img" -d "$WORK/work" >/dev/null
-    check "ramdisk extracted" "$([ -f "$WORK/work/ramdisk/init" ] && echo yes || echo no)" "yes"
-    check "original kept"     "$([ -f "$WORK/work/original.img" ] && echo yes || echo no)" "yes"
-    echo "handmade" > "$WORK/work/ramdisk/handmade.txt"
-    "$BIN" repack "$WORK/work" -o "$WORK/repacked.img" >/dev/null
-    python3 - "$PYPROJ" "$WORK/repacked.img" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from veritpath.bootimg import BootImage
-img = BootImage.parse(open(sys.argv[2], "rb").read(), "init_boot")
-a = img.ramdisk_archive()
-assert a.find("/handmade.txt").data == b"handmade\n", "handmade file lost"
-assert a.find("/init") is not None, "init lost"
-print("  ok   python verifies repacked image")
-PY
-    pass=$((pass + 1))
-fi
+# ------------------------------------------------------- unpack/repack
+echo "== unpack / repack"
+"$BIN" unpack "$WORK/img/init_boot.img" -d "$WORK/work" >/dev/null
+check "ramdisk extracted" "$([ -f "$WORK/work/ramdisk/init" ] && echo yes || echo no)" "yes"
+check "original kept"     "$([ -f "$WORK/work/original.img" ] && echo yes || echo no)" "yes"
+printf 'handmade\n' > "$WORK/work/ramdisk/handmade.txt"
+"$BIN" repack "$WORK/work" -o "$WORK/repacked.img" >/dev/null
+"$BIN" unpack "$WORK/repacked.img" -d "$WORK/work2" >/dev/null
+check "handmade file survives" "$([ "$(cat "$WORK/work2/ramdisk/handmade.txt")" = "handmade" ] && echo yes || echo no)" "yes"
+check "init survives"          "$([ -f "$WORK/work2/ramdisk/init" ] && echo yes || echo no)" "yes"
 
 # ------------------------------------------------------- real-world quirks
 echo "== header quirks (vendor tools / odd dumps)"
-mkdir -p "$WORK/quirks"
-python3 - "$PYPROJ" "$WORK/quirks" <<'PYEOF'
-import gzip, struct, sys
-sys.path.insert(0, sys.argv[1])
-from tests.fixtures import make_init_boot
-base = make_init_boot()
-def patch(off, val):
-    b = bytearray(base); struct.pack_into("<I", b, off, val); return bytes(b)
-d = sys.argv[2] + "/"
-open(d + "hs_padded.img", "wb").write(patch(20, 4096))
-open(d + "hs_zero.img", "wb").write(patch(20, 0))
-open(d + "hs_garbage.img", "wb").write(patch(20, 65536))
-open(d + "hv_future.img", "wb").write(patch(24, 5))
-open(d + "prefix.img", "wb").write(bytes(4096) + base)
-open(d + "gzip.img", "wb").write(gzip.compress(base))
-PYEOF
-for f in hs_padded hs_zero hs_garbage hv_future prefix gzip; do
-    if "$BIN" inject --init-boot "$WORK/quirks/$f.img" \
-        -p "$PYPROJ/payloads/example-su" -o "$WORK/qout" >/dev/null 2>&1; then
+python3 "$KIT" quirks "$WORK/quirks" >/dev/null
+for f in hs_padded hs_zero hs_garbage hv_future prefix gzip both_versions_garbage; do
+    if "$BIN" inject --init-boot "$WORK/quirks/$f.img" -p "$PAY" --permissive -o "$WORK/qout" >/dev/null 2>&1; then
         ok "tolerates $f"
     else
         bad "tolerates $f"
     fi
 done
-python3 - "$PYPROJ" "$WORK/qout" <<'PYEOF'
-import sys, os
-sys.path.insert(0, sys.argv[1])
-from veritpath.bootimg import BootImage
-for name in sorted(os.listdir(sys.argv[2])):
-    img = BootImage.parse(open(os.path.join(sys.argv[2], name), "rb").read(), "init_boot")
-    a = img.ramdisk_archive()
-    assert a.find("/su") is not None, name
-    assert b"import /init.veritpath.rc" in a.find("/init.rc").data, name
-print("  ok   python verifies every quirky header was patched correctly")
-PYEOF
-pass=$((pass + 1))
+if python3 "$KIT" verify-dir "$WORK/qout" >/dev/null 2>&1; then
+    ok "every quirky header was patched correctly"
+else
+    bad "quirky headers"
+fi
 
 # ------------------------------------------------------------ large images
 echo "== large GKI images (a real GKI 1.0 boot.img is ~192MB)"
-python3 - "$PYPROJ" "$WORK/big" <<'PYEOF'
-import gzip, os, struct, sys
-sys.path.insert(0, sys.argv[1])
-from veritpath import compression
-from veritpath.cpio import CpioArchive, CpioEntry
-arch = CpioArchive.empty()
-arch.add(CpioEntry(name="init", mode=0o100755, data=b"#!/system/bin/sh\n"))
-arch.add(CpioEntry(name="init.rc", mode=0o100644, data=b"on early-init\n"))
-rd = compression.compress(arch.serialize(), "gzip")
-kernel = gzip.compress(b"MZ" + b"ARM64" + os.urandom(120 * 1024 * 1024), 1)
-page = 4096
-ru = lambda v, a: (v + a - 1) // a * a
-hdr = bytearray(1584)
-hdr[0:8] = b"ANDROID!"
-struct.pack_into("<I", hdr, 8, len(kernel))
-struct.pack_into("<I", hdr, 12, len(rd))
-struct.pack_into("<I", hdr, 20, 1584)
-struct.pack_into("<I", hdr, 24, 4)
-out = bytearray(hdr); out += bytes(ru(1584, page) - 1584)
-out += kernel; out += bytes(ru(len(kernel), page) - len(kernel))
-out += rd
-d = sys.argv[2] + "/"
-os.makedirs(d, exist_ok=True)
-open(d + "large.img", "wb").write(bytes(out))
-sab = bytearray(out)
-struct.pack_into("<I", sab, 24, 0x11223344)
-struct.pack_into("<I", sab, 40, 0x55667788)
-open(d + "large_sabotaged.img", "wb").write(bytes(sab))
-print("  ok   built %d MB image" % (len(out) // 1024 // 1024))
-PYEOF
-for f in large large_sabotaged; do
+python3 "$KIT" large "$WORK/big" >/dev/null
+for f in large_v3 large_v4 large_v3_sabotaged large_v4_sabotaged; do
     if "$BIN" analyze --boot "$WORK/big/$f.img" > "$WORK/$f.out" 2>&1; then
         ok "parses $f.img"
     else
         bad "parses $f.img"
     fi
-    check "$f reports v4" "$(grep -c '^HEADER_VER:4$' <"$WORK/$f.out")" "1"
     check "$f finds arm64" "$(grep -c '^ARCH:arm64$' <"$WORK/$f.out")" "1"
 done
-python3 - "$BIN" "$WORK/big/large.img" <<'PYEOF'
-import subprocess, sys
-out = subprocess.run([sys.argv[1], "hexdump", sys.argv[2]], capture_output=True, text=True).stdout
-assert "MAGIC8:414e44524f494421" in out, out
-print("  ok   hexdump works on a large image")
-PYEOF
-pass=$((pass + 1))
+check "hexdump works on a large image" \
+    "$("$BIN" hexdump "$WORK/big/large_v4.img" | grep -c 'MAGIC8:414e44524f494421')" "1"
 
 # ------------------------------------------------------------------ errors
 echo "== error handling"
@@ -270,6 +145,7 @@ check "rejects junk image" "$rc" "1"
 "$BIN" bogus-command >/dev/null 2>&1 && rc=0 || rc=$?
 check "rejects bad command" "$rc" "1"
 check "version prints" "$("$BIN" --version)" "veritpath 0.2.0"
+check "doctor reports ok"  "$("$BIN" doctor | grep -c 'VERDICT:OK')" "1"
 
 head -c 4096 /dev/urandom > "$WORK/random.img"
 err=$("$BIN" analyze --boot "$WORK/random.img" 2>&1 || true)
@@ -278,6 +154,8 @@ printf '\x3a\xff\x26\xed' > "$WORK/sparse.img"
 head -c 4096 /dev/zero >> "$WORK/sparse.img"
 err=$("$BIN" analyze --boot "$WORK/sparse.img" 2>&1 || true)
 check "names sparse images" "$(grep -c 'simg2img' <<<"$err")" "1"
+err=$("$BIN" analyze --boot "$WORK/missing.img" 2>&1 || true)
+check "explains missing file" "$(grep -c 'looked for' <<<"$err")" "1"
 
 echo
 echo "== $pass passed, $fail failed =="

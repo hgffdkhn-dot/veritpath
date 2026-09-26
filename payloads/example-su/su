@@ -1,0 +1,11 @@
+#!/system/bin/sh
+# ---------------------------------------------------------------------------
+# PLACEHOLDER — replace this file with your own su binary (or drop your
+# magiskinit / init binary next to a manifest.json that points at it).
+#
+# veritpath does not ship any su implementation: it only takes the files you
+# provide, decides *where* they belong for the detected layout and rebuilds a
+# bootable image.
+# ---------------------------------------------------------------------------
+echo "veritpath example payload: $(id)" >&2
+exec "$@"

@@ -352,6 +352,8 @@ static int infer_header_version(const uint8_t *d, size_t len, const char **why)
     return -1;
 }
 
+int vp_forced_header_version = -1;
+
 static uint32_t detect_header_version(const uint8_t *d, size_t len, const char *path);
 
 uint32_t vp_detect_header_version(const uint8_t *d, size_t len, const char *path)
@@ -361,6 +363,8 @@ uint32_t vp_detect_header_version(const uint8_t *d, size_t len, const char *path
 
 static uint32_t detect_header_version(const uint8_t *d, size_t len, const char *path)
 {
+    if (vp_forced_header_version >= 0)
+        return (uint32_t)vp_forced_header_version;
     if (len < 64) {
         report_bad_version(d, len, path);
         return 0xFFFFFFFFu;
@@ -370,37 +374,29 @@ static uint32_t detect_header_version(const uint8_t *d, size_t len, const char *
         return (hv == 3 || hv == 4) ? hv : 3;
     }
     uint32_t hv24 = rd32(d, 24);
-    uint32_t hs20 = rd32(d, 20);
     uint32_t hv40 = rd32(d, 40);
-    uint32_t page = rd32(d, 36);
 
-    /* v3/v4: version at 24.  Offset 24 of a legacy header is second_size, and a
-     * 3- or 4-byte second stage does not exist, so this cannot collide.  The
-     * header size is only sanity-checked: vendor tools write page-padded or
-     * zeroed values instead of the canonical 1580/1584. */
-    /* offset 24 of a legacy header is second_size, and a 3..6 byte second
-     * stage cannot exist, so hv24 in that range is decisive for v3/v4 - even
-     * when the cmdline is empty (which makes a v3/v4 header look like a v0
-     * with page_size 0).  The header size at @20 is only sanity-checked later,
-     * vendor tools write page-padded or garbage values. */
-    (void)hs20;
+    /* Unambiguous markers first.  Offset 24 of a legacy header is second_size
+     * and a 3..6 byte second stage cannot exist, so this cannot collide; and
+     * offset 40 of a v3/v4 header sits inside the cmdline, which is exactly
+     * why the v3/v4 test has to run before the legacy one. */
     if (hv24 == 3 || hv24 == 4 || hv24 == 5 || hv24 == 6)
         return hv24;
-    if (hv40 <= 2 && plausible_page(page))
-        return hv40;
     if (hv40 <= 2)
         return hv40;
 
-    /* quick checks failed - recover the version from the layout instead of
-     * refusing the image */
+    /* Both markers are garbage: recover the version from the layout instead of
+     * refusing an image that is perfectly fine. */
     const char *why = NULL;
     int guess = infer_header_version(d, len, &why);
     if (guess >= 0) {
         vp_warn("%s: header fields unrecognised, recovered v%d from the layout (%s)",
-                path ? path : "<memory>", guess, why ? why : "?");
+                path ? path : "image", guess, why ? why : "?");
         return (uint32_t)guess;
     }
     report_bad_version(d, len, path);
+    fprintf(stderr, "  force a version instead:  veritpath analyze --boot %s "
+                    "--header-version 3\n", path ? path : "boot.img");
     return 0xFFFFFFFFu;
 }
 

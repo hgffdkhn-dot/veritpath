@@ -2,103 +2,93 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "tag to build (e.g. v0.2.0)"
+        description: tag to build
         required: true
-
-permissions:
-  contents: write
 
 jobs:
   linux:
-    name: linux static
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: make static
-      - run: mkdir -p artifacts && cp build/veritpath artifacts/veritpath-linux-x86_64-static
+      - name: Static linux binaries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+          mkdir -p dist
+          cc -O2 -std=c11 -Wall -Wextra -Isrc src/*.c -lz -static -o dist/veritpath-linux-x86_64
+          x86_64-linux-gnu-gcc -O2 -std=c11 -Isrc src/*.c -lz -static -o dist/veritpath-linux-x86_64
+          aarch64-linux-gnu-gcc -O2 -std=c11 -Isrc src/*.c -lz -static -o dist/veritpath-linux-aarch64
       - uses: actions/upload-artifact@v4
         with:
-          name: veritpath-linux-x86_64-static
-          path: artifacts/veritpath-linux-x86_64-static
+          name: veritpath-linux
+          path: dist/veritpath-linux-*
 
-  macos:
-    name: macos ${{ matrix.arch }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            arch: arm64
-          - os: macos-13
-            arch: x86_64
+  windows:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: make
-      - run: bash tests/run.sh build/veritpath
-      - run: mkdir -p artifacts && cp build/veritpath artifacts/veritpath-macos-${{ matrix.arch }}
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+      - name: Cross-compile for Windows
+        run: |
+          mkdir -p dist
+          x86_64-w64-mingw32-gcc -O2 -std=c11 -Isrc src/*.c -lz -static \
+            -o dist/veritpath-windows-x86_64.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: veritpath-macos-${{ matrix.arch }}
-          path: artifacts/veritpath-macos-${{ matrix.arch }}
+          name: veritpath-windows
+          path: dist/veritpath-windows-*
 
   android:
-    name: android ${{ matrix.abi }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
     steps:
       - uses: actions/checkout@v4
-      - uses: nttld/setup-ndk@v1
-        id: setup-ndk
+      - uses: nttl/setup-ndk@v1
+        id: ndk
         with:
           ndk-version: r26d
-      - run: bash build-android.sh ${{ matrix.abi }}
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      - run: mkdir -p artifacts && cp dist/veritpath-android-${{ matrix.abi }} artifacts/
+      - env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash build.sh android
       - uses: actions/upload-artifact@v4
         with:
-          name: veritpath-android-${{ matrix.abi }}
-          path: artifacts/veritpath-android-${{ matrix.abi }}
+          name: veritpath-android
+          path: dist/veritpath-android-*
 
-  source:
-    name: source tarball
-    runs-on: ubuntu-latest
+  macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          mkdir -p artifacts
-          tar czf artifacts/veritpath-src.tar.gz \
-            --exclude=.git --exclude=build --exclude=dist \
-            src tests Makefile build-android.sh README.md
+      - name: Universal macOS binary
+        run: |
+          mkdir -p dist
+          cc -O2 -std=c11 -Isrc -arch x86_64 src/*.c -lz -o dist/veritpath-macos-x86_64
+          cc -O2 -std=c11 -Isrc -arch arm64  src/*.c -lz -o dist/veritpath-macos-arm64
+          lipo -create -output dist/veritpath-macos-universal dist/veritpath-macos-x86_64 dist/veritpath-macos-arm64
       - uses: actions/upload-artifact@v4
         with:
-          name: veritpath-src
-          path: artifacts/veritpath-src.tar.gz
+          name: veritpath-macos
+          path: dist/veritpath-macos-*
 
   release:
-    name: publish
-    needs: [linux, macos, android, source]
+    needs: [linux, windows, android, macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
+      - name: Package
+        run: |
+          mkdir -p out
+          find artifacts -type f -exec cp {} out/ \;
+          cd out && sha256sum * > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: veritpath ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
-          files: artifacts/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: out/*

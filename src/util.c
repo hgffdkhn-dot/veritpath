@@ -1,5 +1,7 @@
+#include <limits.h>
 #include "vp.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <sys/stat.h>
@@ -290,4 +292,78 @@ char *replace_suffix(const char *path, const char *suffix)
     memcpy(out, path, stem);
     memcpy(out + stem, suffix, strlen(suffix) + 1);
     return out;
+}
+
+void vp_report_missing(const char *role, const char *path)
+{
+    char abs[PATH_MAX];
+    if (!realpath(path, abs)) {
+        /* realpath fails when the file is absent - build the path by hand */
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd)))
+            snprintf(cwd, sizeof(cwd), "?");
+        if (path[0] == '/') {
+            size_t n = strlen(path);
+            if (n >= sizeof(abs))
+                n = sizeof(abs) - 1;
+            memcpy(abs, path, n);
+            abs[n] = 0;
+        } else {
+            size_t n = strlen(cwd);
+            if (n >= sizeof(abs))
+                n = sizeof(abs) - 1;
+            memcpy(abs, cwd, n);
+            abs[n] = 0;
+            size_t room = sizeof(abs) - n - 1;
+            size_t m = strlen(path);
+            if (m > room)
+                m = room;
+            memcpy(abs + n, "/", 1);
+            memcpy(abs + n + 1, path, m);
+            abs[n + 1 + m] = 0;
+        }
+    }
+
+    vp_err("%s: no such file: %s", role, path);
+    fprintf(stderr, "  looked for : %s\n", abs);
+
+    char cwd2[PATH_MAX];
+    if (getcwd(cwd2, sizeof(cwd2)))
+        fprintf(stderr, "  current dir: %s\n", cwd2);
+
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", abs);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = 0;
+        if (!*dir)
+            snprintf(dir, sizeof(dir), "/");
+    }
+
+    DIR *d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "  %s does not exist either\n", dir);
+        fprintf(stderr, "  on Termux, sdcard access needs:  termux-setup-storage\n");
+        return;
+    }
+    fprintf(stderr, "  %s contains:\n", dir);
+    int shown = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && shown < 12) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        char full[PATH_MAX * 2];
+        snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        struct stat st;
+        char size[32];
+        if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
+            double kb = (double)st.st_size / 1024.0;
+            snprintf(size, sizeof(size), "%.1fKiB", kb);
+            fprintf(stderr, "      %-40s %s\n", e->d_name, size);
+        } else {
+            fprintf(stderr, "    d %s\n", e->d_name);
+        }
+        shown++;
+    }
+    closedir(d);
 }

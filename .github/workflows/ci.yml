@@ -2,69 +2,63 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
-    tags-ignore: ["v*"]
+    branches: [main, master]
   pull_request:
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build-test:
-    name: build & test (${{ matrix.os }}, ${{ matrix.cc }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            cc: gcc
-          - os: ubuntu-latest
-            cc: clang
-          - os: macos-latest
-            cc: clang
-    steps:
-      - uses: actions/checkout@v4
-      - name: build
-        run: make CC=${{ matrix.cc }}
-      - name: regression tests
-        run: bash tests/run.sh build/veritpath
-      - name: build strictly (warnings as errors)
-        run: make clean && make CC=${{ matrix.cc }} CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror"
-
-  static:
-    name: static linux binary
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: make static
-      - run: file build/veritpath
-      - uses: actions/upload-artifact@v4
-        with:
-          name: veritpath-linux-x86_64-static
-          path: build/veritpath
+      - name: Build natively
+        run: make
+      - name: Regression suite
+        run: bash tests/run.sh build/veritpath
+      - name: Build with clang and -Werror
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang
+          make clean
+          make CC=clang CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror"
+          bash tests/run.sh build/veritpath
+      - name: Cross-compile checks
+        run: |
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+          bash build.sh linux-aarch64
+          bash build.sh windows-x86_64
 
   android:
-    name: android (${{ matrix.abi }})
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
     steps:
       - uses: actions/checkout@v4
-      - uses: nttld/setup-ndk@v1
-        id: setup-ndk
+      - uses: nttl/setup-ndk@v1
+        id: ndk
         with:
           ndk-version: r26d
-      - name: cross build
-        run: bash build-android.sh ${{ matrix.abi }}
+      - name: Build every Android ABI
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      - run: ls -l dist/
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash build.sh android
       - uses: actions/upload-artifact@v4
         with:
-          name: veritpath-android-${{ matrix.abi }}
-          path: dist/veritpath-android-${{ matrix.abi }}
+          name: veritpath-android
+          path: dist/veritpath-android-*
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: |
+          make
+          bash tests/run.sh build/veritpath
+      - name: Universal binary
+        run: |
+          mkdir -p dist
+          cc -O2 -std=c11 -Wall -Wextra -Isrc -arch x86_64 src/*.c -lz -o dist/veritpath-macos-x86_64
+          cc -O2 -std=c11 -Wall -Wextra -Isrc -arch arm64  src/*.c -lz -o dist/veritpath-macos-arm64
+          lipo -create -output dist/veritpath-macos-universal dist/veritpath-macos-x86_64 dist/veritpath-macos-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: veritpath-macos
+          path: dist/veritpath-macos-*

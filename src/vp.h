@@ -17,12 +17,14 @@
 /* ---------------------------------------------------------------- logging */
 
 extern int vp_verbose;
+extern int vp_forced_header_version;
 void vp_set_verbose(int on);
 void vp_log(const char *fmt, ...);      /* "==> " */
 void vp_info(const char *fmt, ...);     /* "  . " */
 void vp_warn(const char *fmt, ...);     /* "  ! " */
 void vp_dbg(const char *fmt, ...);
 void vp_err(const char *fmt, ...);
+void vp_report_missing(const char *role, const char *path);
 
 /* ------------------------------------------------------------- utilities */
 
