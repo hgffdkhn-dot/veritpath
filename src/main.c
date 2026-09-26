@@ -19,6 +19,7 @@ static void usage(void)
     puts("  unpack    unpack an image into a directory");
     puts("  repack    rebuild an image from a directory");
     puts("  hexdump   dump the first 64 header bytes (diagnostics)");
+    puts("  doctor    show which veritpath build is running");
     puts("");
     puts("input options:");
     puts("  --boot FILE          boot.img");
@@ -641,6 +642,12 @@ int main(int argc, char **argv)
     parse_args(argc - 1, argv + 1, &a);
     if (strcmp(cmd, "hexdump") == 0)
         return cmd_hexdump(&a);
+    if (strcmp(cmd, "doctor") == 0) {
+        printf("VERSION:%s\n", VP_VERSION);
+        printf("BINARY:%s\n", argv[0]);
+        printf("VERDICT:OK\n");
+        return 0;
+    }
     if (strcmp(cmd, "analyze") == 0)
         return cmd_analyze(&a);
     if (strcmp(cmd, "plan") == 0)
