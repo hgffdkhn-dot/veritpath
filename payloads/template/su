@@ -1,0 +1,4 @@
+#!/system/bin/sh
+# replace with your own binary
+echo "my su: $(id)" >&2
+exec "$@"

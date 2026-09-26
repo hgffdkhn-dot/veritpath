@@ -51,6 +51,7 @@ veritpath repack  work/ -o boot.new.img
 veritpath hexdump boot.img                   # diagnostics
 veritpath doctor                             # which build is running
 sh install.sh                                # install (and drop old files)
+veritpath verify out/boot.veritpath.img      # check a patched image
 ```
 
 Options: `--header-version N` (force a header version), `--patch-vendor-boot`,
@@ -195,6 +196,30 @@ veritpath analyze --boot boot.img --header-version 3
 
 The error lists the path it resolved, the working directory, the directory
 contents and a close match, so it is obvious where the mismatch is.
+
+## Documentation
+
+| Doc | What it covers |
+|---|---|
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | install, pull an image, inject, flash, troubleshooting |
+| [docs/DEVELOPERS.md](docs/DEVELOPERS.md) | payload format, manifest fields, layout rules, SELinux, exit codes |
+
+For payload authors the short version is: a directory with your binaries plus a
+`manifest.json` declaring where each file goes (see `payloads/template/`).
+veritpath ships no su implementation — it decides *where* your files belong for
+the detected layout and rebuilds a bootable image.
+
+Checking a payload without touching an image:
+
+```bash
+veritpath payload-check my-su
+```
+
+Checking an image you just built (non-zero exit if anything is missing):
+
+```bash
+veritpath verify out/init_boot.veritpath.img -p my-su
+```
 
 ## Tests
 

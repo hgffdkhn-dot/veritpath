@@ -29,6 +29,8 @@ static void usage(void)
     puts("  unpack    unpack an image into a directory");
     puts("  repack    rebuild an image from a directory");
     puts("  hexdump   dump the first 64 header bytes (diagnostics)");
+    puts("  verify    check an injected image (exit 1 if incomplete)");
+    puts("  payload-check  validate a payload directory");
     puts("  doctor    show which veritpath build is running");
     puts("");
     puts("input options:");
@@ -332,6 +334,167 @@ static int cmd_hexdump(args_t *a)
         printf("detect_header_version:%u\n", hv);
 
     buf_free(&data);
+    return 0;
+}
+
+/* An image built by `veritpath inject`, checked without needing anything else.
+ *
+ * Reports what lands in the ramdisk, whether the rc hook and the file_contexts
+ * label made it in, and whether the cmdline was patched. Exits non-zero if a
+ * required piece is missing, so it can gate a flash in a script. */
+static int cmd_verify(args_t *a)
+{
+    const char *path = a->positional;
+    if (!path) {
+        vp_err("usage: veritpath verify <image> [-p payload]");
+        return 1;
+    }
+    buf_t data;
+    buf_init(&data);
+    if (read_file(path, &data) != 0) {
+        vp_report_missing("image", path);
+        buf_free(&data);
+        return 1;
+    }
+
+    boot_img_t img;
+    if (boot_img_parse(data.data, data.len, NULL, path, &img) != 0) {
+        vp_err("%s: cannot parse", path);
+        boot_img_free(&img);
+        buf_free(&data);
+        return 1;
+    }
+
+    int rc = 0;
+    printf("FILE:%s\n", path);
+    printf("HEADER_VER:%u\n", img.header_version);
+    printf("PAGESIZE:%u\n", img.page_size);
+    if (img.ramdisk.len) {
+        printf("RAMDISK_SZ:%zu\n", img.ramdisk.len);
+        printf("RAMDISK_FMT:%s\n",
+               comp_name(comp_detect(img.ramdisk.data, img.ramdisk.len)));
+    }
+
+    cpio_archive_t arc;
+    cpio_init(&arc);
+    if (img.ramdisk.len && boot_img_ramdisk_archive(&img, &arc) == 0) {
+        printf("SEGMENTS:%zu\n", arc.n);
+        cpio_entry_t *marker = cpio_find(&arc, "veritpath.json");
+        printf("PATCHED:%s\n", marker ? "1" : "0");
+        if (!marker) {
+            vp_err("  no veritpath marker in the ramdisk");
+            rc = 1;
+        } else if (vp_verbose) {
+            fwrite(marker->data.data, 1, marker->data.len, stdout);
+            putchar('\n');
+        }
+
+        /* files declared by a payload, when one is given */
+        if (a->payload) {
+            payload_t p;
+            if (payload_load(a->payload, &p) == 0) {
+                for (int i = 0; i < p.n_files; i++) {
+                    cpio_entry_t *e = cpio_find(&arc, p.files[i].dest);
+                    int ok = e != NULL;
+                    if (ok && p.files[i].mode)
+                        ok = CPIO_PERMS(e) == (p.files[i].mode & 07777);
+                    printf("  %-28s %s\n", p.files[i].dest,
+                           ok ? "present" : "MISSING");
+                    if (!ok && p.files[i].required)
+                        rc = 1;
+                }
+                if (p.rc.file[0]) {
+                    cpio_entry_t *e = cpio_find(&arc, p.rc.file);
+                    printf("  %-28s %s\n", p.rc.file, e ? "present" : "MISSING");
+                    if (!e)
+                        rc = 1;
+                }
+                for (int i = 0; i < p.rc.n_import; i++) {
+                    cpio_entry_t *e = cpio_find(&arc, p.rc.import_into[i]);
+                    int hooked = e && e->data.len &&
+                                 memmem(e->data.data, e->data.len, "import ", 7);
+                    printf("  %-28s %s\n", p.rc.import_into[i],
+                           hooked ? "hooks the rc" : "NOT HOOKED");
+                    if (!hooked)
+                        rc = 1;
+                }
+                payload_free(&p);
+            } else {
+                vp_err("  cannot load payload %s", a->payload);
+                rc = 1;
+            }
+        } else {
+            /* no payload given: report what is obviously ours */
+            static const char *known[] = {"/su", "/init.veritpath.rc",
+                                          "/veritpath.json"};
+            for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+                cpio_entry_t *e = cpio_find(&arc, known[i]);
+                printf("  %-28s %s\n", known[i], e ? "present" : "absent");
+            }
+            cpio_entry_t *init = cpio_find(&arc, "/init.rc");
+            int hooked = init && init->data.len &&
+                         memmem(init->data.data, init->data.len, "import ", 7);
+            printf("  %-28s %s\n", "/init.rc", hooked ? "hooks the rc" : "not hooked");
+            cpio_entry_t *fc = cpio_find(&arc, "/file_contexts");
+            int labelled = fc && fc->data.len &&
+                           memmem(fc->data.data, fc->data.len, "u:object_r", 10);
+            printf("  %-28s %s\n", "/file_contexts",
+                   labelled ? "has labels" : "no labels");
+        }
+    } else {
+        vp_err("  no ramdisk in this image");
+        rc = 1;
+    }
+    cpio_free(&arc);
+
+    const char *cl = boot_img_cmdline(&img);
+    printf("CMDLINE:%s\n", cl && *cl ? cl : "(empty)");
+    if (cl && strstr(cl, "androidboot.selinux=permissive"))
+        puts("SELINUX:permissive");
+
+    boot_img_free(&img);
+    buf_free(&data);
+    if (rc == 0)
+        puts("VERDICT:OK");
+    else
+        puts("VERDICT:INCOMPLETE");
+    return rc;
+}
+
+static int cmd_payload_check(args_t *a)
+{
+    const char *dir = a->positional;
+    if (!dir) {
+        vp_err("usage: veritpath payload-check <payload-dir> [arch] [api]");
+        return 1;
+    }
+    payload_t p;
+    if (payload_load(dir, &p) != 0) {
+        vp_err("cannot load payload from %s", dir);
+        return 1;
+    }
+    printf("NAME:%s\n", p.name);
+    printf("FILES:%d\n", p.n_files);
+    for (int i = 0; i < p.n_files; i++) {
+        printf("  %-28s mode %04o%s%s\n", p.files[i].dest, p.files[i].mode & 07777,
+               p.files[i].required ? "  required" : "",
+               p.files[i].context[0] ? "  +selinux" : "");
+    }
+    if (p.rc.file[0]) {
+        printf("RC:%s\n", p.rc.file);
+        for (int i = 0; i < p.rc.n_import; i++)
+            printf("  IMPORT_INTO:%s\n", p.rc.import_into[i]);
+    }
+    if (p.cmdline_append[0])
+        printf("CMDLINE_APPEND:%s\n", p.cmdline_append);
+    printf("SELINUX:%s\n", p.selinux[0] ? p.selinux : "(unchanged)");
+
+    char msg[512];
+    if (payload_check(&p, "arm64", 33, msg, sizeof(msg)) != 0 && msg[0]) {
+        printf("WARN:%s\n", msg);
+    }
+    payload_free(&p);
+    puts("VERDICT:OK");
     return 0;
 }
 
@@ -670,6 +833,10 @@ int main(int argc, char **argv)
         printf("VERDICT:OK\n");
         return 0;
     }
+    if (strcmp(cmd, "verify") == 0)
+        return cmd_verify(&a);
+    if (strcmp(cmd, "payload-check") == 0)
+        return cmd_payload_check(&a);
     if (strcmp(cmd, "analyze") == 0)
         return cmd_analyze(&a);
     if (strcmp(cmd, "plan") == 0)

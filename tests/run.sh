@@ -155,6 +155,28 @@ check "--brief drops the report"     "$(grep -c 'boot image analysis' <<<"$out")
 out=$("$BIN" analyze --json --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img")
 check "--json still parses"          "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["target"])' <<<"$out")" "init_boot"
 
+# ------------------------------------------------------------ verify / payload
+echo "== verify and payload-check"
+out=$("$BIN" verify "$WORK/out/init_boot.veritpath.img")
+check "verify reports patched"   "$(grep -c '^PATCHED:1$' <<<"$out")" "1"
+check "verify finds su"          "$(grep -c '/su  *present' <<<"$out")" "1"
+check "verify finds rc hook"     "$(grep -c 'hooks the rc' <<<"$out")" "1"
+check "verify prints verdict"    "$(grep -c '^VERDICT:OK$' <<<"$out")" "1"
+
+if "$BIN" verify "$WORK/img/init_boot.img" >/dev/null 2>&1; then
+    bad "verify rejects an unpatched image"
+else
+    ok "verify rejects an unpatched image"
+fi
+
+out=$("$BIN" verify "$WORK/out/init_boot.veritpath.img" -p "$PAY")
+check "verify honours a payload" "$(grep -c '^VERDICT:OK$' <<<"$out")" "1"
+
+out=$("$BIN" payload-check "$PAY")
+check "payload-check names it"   "$(grep -c '^NAME:example-su$' <<<"$out")" "1"
+check "payload-check lists files" "$(grep -c '^FILES:1$' <<<"$out")" "1"
+check "payload-check lists rc"   "$(grep -c '^RC:/init.veritpath.rc$' <<<"$out")" "1"
+
 # ------------------------------------------------------------------ errors
 echo "== error handling"
 head -c 8192 /dev/zero > "$WORK/junk.img"

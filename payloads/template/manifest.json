@@ -1,0 +1,25 @@
+{
+  "name": "my-su",
+  "version": "1.0.0",
+  "arch": ["arm64"],
+  "min_api": 26,
+
+  "files": [
+    {
+      "src": "su",
+      "dest": "/su",
+      "mode": "0755",
+      "context": "u:object_r:rootfs:s0",
+      "required": true
+    }
+  ],
+
+  "rc": {
+    "file": "/init.mysu.rc",
+    "import_into": ["/init.rc"],
+    "content": "on post-fs-data\n    chmod 0755 /su\n\nservice mysu /su --daemon\n    class late_start\n    user root\n    group root\n    seclabel u:r:init:s0\n    oneshot\n"
+  },
+
+  "cmdline_append": ["androidboot.mysu=1"],
+  "selinux": "permissive"
+}
