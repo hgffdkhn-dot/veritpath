@@ -50,11 +50,12 @@ veritpath unpack  boot.img -d work/          # ramdisk tree + original.img
 veritpath repack  work/ -o boot.new.img
 veritpath hexdump boot.img                   # diagnostics
 veritpath doctor                             # which build is running
+sh install.sh                                # install (and drop old files)
 ```
 
 Options: `--header-version N` (force a header version), `--patch-vendor-boot`,
 `--permissive`, `--cmdline`, `--segment N`, `--format lz4_legacy`,
-`--force`, `--dry-run`, `--json`, `-v`.
+`--force`, `--dry-run`, `--brief`, `--json`, `-v`.
 
 ### Android
 
@@ -75,52 +76,87 @@ is mounted `noexec`, so binaries there never run — copy them out first.
 
 ## Output format
 
-`analyze` prints magiskboot-style `KEY:VALUE`, one item per line, no colour and
-no decoration, so it is easy to `grep`:
+`analyze` prints a grouped, annotated report by default — one block for the
+verdict, one per image, then the findings and the injection target:
 
 ```
-[init_boot.img]
-HEADER_VER:4
-RAMDISK_SZ:12721173
-RAMDISK_FMT:lz4_legacy
-PAGESIZE:4096
-
-ARCH:arm64
-ANDROID:13 (API 33)
-LAYOUT:init_boot
-SYSTEM_AS_ROOT:1
-GKI:1
-SEGMENTS:1
-PATCHED:0
-TARGET:init_boot
-OPTIONAL:vendor_boot
+veritpath 0.2.0 — boot image analysis
+==============================================================
+  arch                 arm64
+  android_version      13
+  ramdisk_layout       init_boot
+  system_as_root       True
+  gki                  True
+  kernel_compression   gzip
+  ramdisk_compression  gzip
+  ramdisk_segments     ['main']
+  already_patched      False
+--------------------------------------------------------------
+  boot.header_version  4  (boot image header)
+  boot.kernel_size     34
+  boot.page_size       4096
+  init_boot.header_version 4  (boot image header)
+  init_boot.ramdisk_size 224
+  init_boot.ramdisk_format gzip
+  init_boot.page_size  4096
+  kernel_compression   gzip  (kernel payload)
+  ramdisk_segments     ['main']  (cpio segments inside the ramdisk)
+  ramdisk_entries      4
+  has_init             True  (/init present in ramdisk)
+  ramdisk_contains_system False  (/system/bin/init inside the ramdisk)
+  already_patched      False  (no veritpath marker in ramdisk)
+  ramdisk_compression  gzip  (ramdisk payload magic)
+--------------------------------------------------------------
+  · Android 13+ GKI: the generic ramdisk lives in init_boot.img...
+  · system-as-root: the ramdisk is only the first-stage init...
+--------------------------------------------------------------
+  injection target     init_boot
 ```
 
-`-v` appends findings and advice; `--json` prints structured output.
+Each `·` line is a concrete consequence, not decoration: where the ramdisk
+lives, whether /system gets mounted over it, and which compression will be used
+when rebuilding.
 
-## Android quirks handled for you
-
-`build-android.sh` post-processes each binary because Android refuses to load
-an ordinary static Linux executable:
-
-| Check | Why |
-|---|---|
-| `PT_TLS` alignment ≥ 64 (32-bit: ≥ 32) | Bionic aborts with `executable's TLS segment is underaligned`; NDK lld emits 8 |
-| `ET_DYN` (PIE) | Android 5+ refuses `ET_EXEC`; a static link can come out non-PIE, in which case the script relinks dynamically |
-| `PT_LOAD` aligned to 16384 | Android 15+ devices with 16KB pages require it |
-
-`tools/elf_fix.py` does the patching with nothing but the standard library
-(the same job as `termux-elf-cleaner`), and `--check` reports all three:
+Two other shapes:
 
 ```bash
-python3 tools/elf_fix.py --check dist/veritpath-android-arm64-v8a
+veritpath analyze --brief --boot boot.img    # magiskboot-style KEY:VALUE
+veritpath analyze --json  --boot boot.img    # machine readable
 ```
 
-Patching an already-built binary by hand:
+`--brief` emits `HEADER_VER:` / `RAMDISK_SZ:` / `ARCH:` / `TARGET:` one per
+line, which is what you want when piping into `grep`.
+
+## Installing
+
+The binary is self-contained — no `.pyz`, no launcher, no data directory. Copy
+it anywhere you can `chmod +x` and run it:
 
 ```bash
-python3 tools/elf_fix.py /data/local/tmp/veritpath
+adb push veritpath /data/local/tmp/veritpath
+adb shell chmod 755 /data/local/tmp/veritpath
+adb shell /data/local/tmp/veritpath analyze --boot /sdcard/boot.img
 ```
+
+Or let the installer pick a prefix (Termux → `$PREFIX/bin`, root →
+`/usr/local/bin`, rooted Android shell → `/data/local/tmp`):
+
+```bash
+sh install.sh              # auto-detect
+sh install.sh --to-tmp     # /data/local/tmp
+sh install.sh --prefix DIR # somewhere specific
+```
+
+`install.sh` also removes the old Python-era files (`bin/veritpath` launcher
+and `share/veritpath/`). Those are what shadowed freshly built binaries and
+made `veritpath --version` keep printing 0.1.0. If you only want the cleanup:
+
+```bash
+sh install.sh --clean
+```
+
+Note that `/storage/emulated/0` (sdcard) is mounted `noexec` — a binary there
+never runs, so always copy it somewhere like `/data/local/tmp` first.
 
 ## Troubleshooting
 

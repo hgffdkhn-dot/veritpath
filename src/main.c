@@ -50,6 +50,8 @@ static void usage(void)
     puts("      --no-backup      do not keep a backup of the original image");
     puts("      --dry-run        patch in memory only, write nothing");
     puts("      --json           machine readable output");
+    puts("      --brief          compact KEY:VALUE output (magiskboot style)");
+    puts("      --header-version N  force a header version (0-4, diagnostics)");
     puts("");
     puts("examples:");
     puts("  veritpath analyze --boot boot.img --init-boot init_boot.img");
@@ -76,6 +78,7 @@ static const struct option kLongOpts[] = {
     {"dry-run", no_argument, 0, 'D'},
     {"json", no_argument, 0, 'j'},
     {"verbose", no_argument, 0, 'v'},
+    {"brief", no_argument, 0, 'b'},
     {"help", no_argument, 0, 'h'},
     {"header-version", required_argument, 0, 'H'},
     {0, 0, 0, 0},
@@ -87,6 +90,7 @@ typedef struct {
     const char *positional;          /* unpack <image> / repack <dir> */
     options_t opts;
     int json;
+    int brief;
 } args_t;
 
 static void parse_args(int argc, char **argv, args_t *a)
@@ -115,6 +119,7 @@ static void parse_args(int argc, char **argv, args_t *a)
         case 'n': a->opts.no_backup = 1; break;
         case 'D': a->opts.dry_run = 1; break;
         case 'j': a->json = 1; break;
+        case 'b': a->brief = 1; break;
         case 'v': vp_set_verbose(1); break;
         case 'H': vp_forced_header_version = atoi(optarg); break;
         case 'h': usage(); exit(0);
@@ -337,7 +342,8 @@ static int cmd_analyze(args_t *a)
         return 1;
     analysis_t res;
     detect_analyze(set, g_n, &res);
-    detect_print(&res, a->json);
+    int mode = a->json ? VP_OUT_JSON : (a->brief ? VP_OUT_BRIEF : VP_OUT_RICH);
+    detect_print(&res, mode);
     free_images();
     return 0;
 }

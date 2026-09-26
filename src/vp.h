@@ -209,7 +209,14 @@ typedef struct {
 int detect_arch(const uint8_t *kernel, size_t klen, const uint8_t *dtb, size_t dlen,
                 char *out, size_t outsz);
 void detect_analyze(image_set_t *set, size_t n, analysis_t *res);
-void detect_print(analysis_t *res, int as_json);
+/* output modes for detect_print() */
+typedef enum {
+    VP_OUT_RICH = 0,   /* grouped, annotated report (default) */
+    VP_OUT_JSON = 1,   /* machine readable */
+    VP_OUT_BRIEF = 2   /* magiskboot-style KEY:VALUE */
+} vp_out_mode;
+
+void detect_print(analysis_t *res, int mode);
 
 /* ------------------------------------------------------------------ json */
 

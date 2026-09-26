@@ -36,7 +36,7 @@ ok "synthetic images generated"
 
 # ------------------------------------------------------------ analyze
 echo "== analyze"
-out=$("$BIN" analyze --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img" \
+out=$("$BIN" analyze --brief --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img" \
       --vendor-boot "$WORK/img/vendor_boot.img")
 check "arch detected"        "$(grep -c '^ARCH:arm64$' <<<"$out")" "1"
 check "layout is init_boot"  "$(grep -c '^LAYOUT:init_boot$' <<<"$out")" "1"
@@ -47,7 +47,7 @@ check "brief lists each image" "$(grep -c '^\[' <<<"$out")" "3"
 out=$("$BIN" analyze --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img" --json)
 check "json output parses"   "$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["target"])' <<<"$out")" "init_boot"
 
-out=$("$BIN" analyze --boot "$WORK/img/boot.img" --vendor-boot "$WORK/img/vendor_boot.img")
+out=$("$BIN" analyze --brief --boot "$WORK/img/boot.img" --vendor-boot "$WORK/img/vendor_boot.img")
 check "vendor_boot layout"   "$(grep -c '^LAYOUT:vendor_boot$' <<<"$out")" "1"
 
 # --------------------------------------------------------------- plan
@@ -94,7 +94,7 @@ echo "== compression"
 "$BIN" inject --init-boot "$WORK/img/init_boot.img" -p "$PAY" \
     --format lz4_legacy -o "$WORK/out4" >/dev/null
 check "forced lz4_legacy" "$(head -c 4 "$WORK/out4/init_boot.veritpath.img" >/dev/null; \
-    "$BIN" analyze --init-boot "$WORK/out4/init_boot.veritpath.img" | grep -c '^RAMDISK_FMT:lz4_legacy$')" "1"
+    "$BIN" analyze --brief --init-boot "$WORK/out4/init_boot.veritpath.img" | grep -c '^RAMDISK_FMT:lz4_legacy$')" "1"
 
 # ------------------------------------------------------- unpack/repack
 echo "== unpack / repack"
@@ -129,7 +129,7 @@ fi
 echo "== large GKI images (a real GKI 1.0 boot.img is ~192MB)"
 python3 "$KIT" large "$WORK/big" >/dev/null
 for f in large_v3 large_v4 large_v3_sabotaged large_v4_sabotaged; do
-    if "$BIN" analyze --boot "$WORK/big/$f.img" > "$WORK/$f.out" 2>&1; then
+    if "$BIN" analyze --brief --boot "$WORK/big/$f.img" > "$WORK/$f.out" 2>&1; then
         ok "parses $f.img"
     else
         bad "parses $f.img"
@@ -138,6 +138,22 @@ for f in large_v3 large_v4 large_v3_sabotaged large_v4_sabotaged; do
 done
 check "hexdump works on a large image" \
     "$("$BIN" hexdump "$WORK/big/large_v4.img" | grep -c 'MAGIC8:414e44524f494421')" "1"
+
+# ------------------------------------------------------- default report style
+echo "== report format"
+out=$("$BIN" analyze --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img")
+check "default is the grouped report" "$(grep -c 'boot image analysis' <<<"$out")" "1"
+check "report has a separator rule"  "$(grep -c '^==============================================================$' <<<"$out")" "1"
+check "report names the target"      "$(grep -c '^  injection target     init_boot$' <<<"$out")" "1"
+check "report shows ramdisk entries" "$(grep -c 'ramdisk_entries' <<<"$out")" "1"
+check "report uses True/False"       "$(grep -c 'system_as_root       True' <<<"$out")" "1"
+
+out=$("$BIN" analyze --brief --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img")
+check "--brief keeps KEY:VALUE"      "$(grep -c '^ARCH:arm64$' <<<"$out")" "1"
+check "--brief drops the report"     "$(grep -c 'boot image analysis' <<<"$out")" "0"
+
+out=$("$BIN" analyze --json --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img")
+check "--json still parses"          "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["target"])' <<<"$out")" "init_boot"
 
 # ------------------------------------------------------------------ errors
 echo "== error handling"

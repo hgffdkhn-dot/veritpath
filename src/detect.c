@@ -335,9 +335,254 @@ static const char *yesno(int v)
     return v ? "1" : "0";
 }
 
-void detect_print(analysis_t *res, int as_json)
+/* ------------------------------------------------------------ rich report */
+
+typedef struct {
+    int entries;
+    int has_init;
+    int contains_system_init;
+    char segments[256];
+} ramdisk_info_t;
+
+static void ramdisk_info(const boot_img_t *img, ramdisk_info_t *out)
 {
-    if (as_json) {
+    memset(out, 0, sizeof(*out));
+    snprintf(out->segments, sizeof(out->segments), "[]");
+    if (!img)
+        return;
+
+    cpio_archive_t a;
+    cpio_init(&a);
+    if (boot_img_ramdisk_archive((boot_img_t *)img, &a) != 0) {
+        cpio_free(&a);
+        return;
+    }
+    size_t total = 0;
+    for (size_t i = 0; i < a.n; i++)
+        total += a.segs[i].n;
+    out->entries = (int)total;
+    out->has_init = cpio_find(&a, "init") != NULL;
+    out->contains_system_init = cpio_find(&a, "system/bin/init") != NULL;
+
+    char buf[256];
+    size_t pos = 0;
+    pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "[");
+    for (size_t i = 0; i < a.n; i++) {
+        const char *label = a.segs[i].label;
+        if (!label || !*label)
+            label = "segment";
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "%s'%s'",
+                                i ? ", " : "", label);
+        if (pos >= sizeof(buf))
+            break;
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "]");
+    snprintf(out->segments, sizeof(out->segments), "%s", buf);
+    cpio_free(&a);
+}
+
+static void print_rule(char c)
+{
+    for (int i = 0; i < 62; i++)
+        putchar(c);
+    putchar('\n');
+}
+
+static void kv(const char *key, const char *val)
+{
+    printf("  %-20s %s\n", key, val);
+}
+
+static void kv_note(const char *key, const char *val, const char *note)
+{
+    printf("  %-20s %s  (%s)\n", key, val, note);
+}
+
+static void kv_bool(const char *key, int v)
+{
+    printf("  %-20s %s\n", key, v ? "True" : "False");
+}
+
+static void kv_bool_note(const char *key, int v, const char *note)
+{
+    printf("  %-20s %s  (%s)\n", key, v ? "True" : "False", note);
+}
+
+static void kv_int(const char *key, long v)
+{
+    printf("  %-20s %ld\n", key, v);
+}
+
+/* os_version: bits 11+ are a.b.c, the low 11 bits are the patch level */
+static void os_version_str(uint32_t v, char *out, size_t outsz)
+{
+    if (!v) {
+        snprintf(out, outsz, "unknown");
+        return;
+    }
+    uint32_t ver = v >> 11;
+    uint32_t a = (ver >> 14) & 0x3F, b = (ver >> 7) & 0x7F, c = ver & 0x7F;
+    snprintf(out, outsz, "%u.%u.%u", a, b, c);
+}
+
+static void patch_level_str(uint32_t v, char *out, size_t outsz)
+{
+    uint32_t patch = v & 0x7FF;
+    if (!patch) {
+        snprintf(out, outsz, "unknown");
+        return;
+    }
+    snprintf(out, outsz, "%04u-%02u", 2000 + (patch >> 4), patch & 0xF);
+}
+
+/* one "role.field  value  (note)" block per supplied image */
+static void print_img_rich(const char *role, const boot_img_t *img)
+{
+    if (!img)
+        return;
+    char key[64];
+
+    snprintf(key, sizeof(key), "%s.header_version", role);
+    printf("  %-20s %u  (%s image header)\n", key, img->header_version,
+           img->is_vendor ? "vendor boot" : "boot");
+    if (!img->is_vendor && img->kernel.len) {
+        snprintf(key, sizeof(key), "%s.kernel_size", role);
+        kv_int(key, (long)img->kernel.len);
+    }
+    if (img->ramdisk.len) {
+        snprintf(key, sizeof(key), "%s.ramdisk_size", role);
+        kv_int(key, (long)img->ramdisk.len);
+        snprintf(key, sizeof(key), "%s.ramdisk_format", role);
+        kv(key, comp_name(comp_detect(img->ramdisk.data, img->ramdisk.len)));
+    }
+    snprintf(key, sizeof(key), "%s.page_size", role);
+    printf("  %-20s %u\n", key, img->page_size);
+
+    const char *cl = boot_img_cmdline((boot_img_t *)img);
+    if (cl) {
+        while (*cl == ' ')
+            cl++;
+        if (*cl) {
+            snprintf(key, sizeof(key), "%s.cmdline", role);
+            kv(key, cl);
+        }
+    }
+    if (img->os_version) {
+        char v[32], p[32];
+        os_version_str(img->os_version, v, sizeof(v));
+        patch_level_str(img->os_version, p, sizeof(p));
+        snprintf(key, sizeof(key), "%s.os_version", role);
+        char note[64];
+        snprintf(note, sizeof(note), "patch level %s", p);
+        printf("  %-20s %s  (%s)\n", key, v, note);
+    }
+    if (img->n_frags) {
+        snprintf(key, sizeof(key), "%s.fragments", role);
+        char names[256];
+        size_t pos = 0;
+        pos += (size_t)snprintf(names + pos, sizeof(names) - pos, "[");
+        for (size_t i = 0; i < img->n_frags; i++)
+            pos += (size_t)snprintf(names + pos, sizeof(names) - pos,
+                                    "%s'%s'", i ? ", " : "", img->frags[i].name);
+        snprintf(names + pos, sizeof(names) - pos, "]");
+        kv(key, names);
+    }
+}
+
+static void print_rich(analysis_t *res)
+{
+    printf("veritpath %s \xe2\x80\x94 boot image analysis\n", VP_VERSION);
+    print_rule('=');
+
+    kv("arch", res->arch);
+    kv("android_version", res->android_version);
+    kv("ramdisk_layout", res->layout);
+    kv_bool("system_as_root", res->system_as_root);
+    kv_bool("gki", res->gki);
+
+    const boot_img_t *ksrc = res->boot;
+    if (!ksrc || !ksrc->kernel.len)
+        ksrc = res->init_boot;
+    if (!ksrc || !ksrc->kernel.len)
+        ksrc = res->vendor_boot;
+    if (ksrc && ksrc->kernel.len)
+        kv("kernel_compression",
+           comp_name(comp_detect(ksrc->kernel.data, ksrc->kernel.len)));
+
+    ramdisk_info_t ri;
+    ramdisk_info(res->target_img, &ri);
+    if (res->target_img && res->target_img->ramdisk.len)
+        kv("ramdisk_compression",
+           comp_name(comp_detect(res->target_img->ramdisk.data,
+                                 res->target_img->ramdisk.len)));
+    kv("ramdisk_segments", ri.segments);
+    kv_bool("already_patched", res->already_patched);
+
+    if (res->boot || res->init_boot || res->vendor_boot) {
+        print_rule('-');
+        print_img_rich("boot", res->boot);
+        print_img_rich("init_boot", res->init_boot);
+        print_img_rich("vendor_boot", res->vendor_boot);
+    }
+
+    if (res->target_img) {
+        if (ksrc && ksrc->kernel.len)
+            kv_note("kernel_compression",
+                    comp_name(comp_detect(ksrc->kernel.data, ksrc->kernel.len)),
+                    "kernel payload");
+        kv_note("ramdisk_segments", ri.segments, "cpio segments inside the ramdisk");
+        kv_int("ramdisk_entries", ri.entries);
+        kv_bool_note("has_init", ri.has_init, "/init present in ramdisk");
+        printf("  %-20s %s  (/system/bin/init inside the ramdisk)\n",
+               "ramdisk_contains_system", ri.contains_system_init ? "True" : "False");
+        kv_bool_note("already_patched", res->already_patched,
+                     "no veritpath marker in ramdisk");
+        if (res->target_img->ramdisk.len)
+            kv_note("ramdisk_compression",
+                    comp_name(comp_detect(res->target_img->ramdisk.data,
+                                          res->target_img->ramdisk.len)),
+                    "ramdisk payload magic");
+    }
+
+    print_rule('-');
+    printf("  \xc2\xb7 %s\n", layout_advice(res->layout));
+    if (res->system_as_root)
+        puts("  \xc2\xb7 system-as-root: the ramdisk is only the first-stage init, "
+             "/system is mounted as '/'. Inject into the ramdisk, not into /system.");
+    else
+        puts("  \xc2\xb7 legacy root layout: injected files stay visible in / after boot.");
+    if (ri.entries && res->n_segments > 1)
+        puts("  \xc2\xb7 Multi-stage ramdisk: the first stage is loaded before the "
+             "main one - init/overlay files must go into the main segment.");
+    if (res->target_img && res->target_img->ramdisk.len) {
+        char line[256];
+        snprintf(line, sizeof(line),
+                 "  \xc2\xb7 Ramdisk is %s compressed \xe2\x80\x94 veritpath rebuilds "
+                 "it with the same format.",
+                 comp_name(comp_detect(res->target_img->ramdisk.data,
+                                       res->target_img->ramdisk.len)));
+        puts(line);
+    }
+    if (res->gki)
+        puts("  \xc2\xb7 GKI device: the kernel is never touched, only the ramdisk.");
+    if (res->recovery_fragment)
+        puts("  \xc2\xb7 vendor_boot holds a RECOVERY fragment: add "
+             "--patch-vendor-boot to reach recovery/fastbootd.");
+    if (res->already_patched)
+        puts("  \xc2\xb7 image already carries a veritpath payload "
+             "(--force to re-inject)");
+    if (strcmp(res->arch, "unknown") == 0)
+        puts("  \xc2\xb7 arch unknown: init_boot.img has no kernel, supply boot.img too");
+    if (res->slot[0])
+        printf("  \xc2\xb7 A/B slot: %s\n", res->slot);
+
+    print_rule('-');
+    kv("injection target", res->target[0] ? res->target : "none");
+}
+
+void detect_print(analysis_t *res, int mode)
+{
+    if (mode == VP_OUT_JSON) {
         printf("{\n");
         printf("  \"arch\": \"%s\",\n", res->arch);
         printf("  \"android_api\": %d,\n", res->android_api);
@@ -352,44 +597,25 @@ void detect_print(analysis_t *res, int as_json)
         return;
     }
 
-    /* magiskboot-style: one KEY:VALUE per line, no decoration */
-    print_img(res->boot ? res->boot->path : NULL, res->boot);
-    print_img(res->init_boot ? res->init_boot->path : NULL, res->init_boot);
-    print_img(res->vendor_boot ? res->vendor_boot->path : NULL, res->vendor_boot);
-
-    printf("ARCH:%s\n", res->arch);
-    if (res->android_api)
-        printf("ANDROID:%s (API %d)\n", res->android_version, res->android_api);
-    else
-        printf("ANDROID:%s\n", res->android_version);
-    printf("LAYOUT:%s\n", res->layout);
-    printf("SYSTEM_AS_ROOT:%s\n", yesno(res->system_as_root));
-    printf("GKI:%s\n", yesno(res->gki));
-    printf("SEGMENTS:%d\n", res->n_segments);
-    printf("PATCHED:%s\n", yesno(res->already_patched));
-    printf("TARGET:%s\n", res->target[0] ? res->target : "none");
-    if (res->has_vendor_boot && strcmp(res->target, "vendor_boot") != 0)
-        puts("OPTIONAL:vendor_boot");
-
-    if (!vp_verbose)
+    if (mode == VP_OUT_BRIEF) {
+        print_img(res->boot ? res->boot->path : NULL, res->boot);
+        print_img(res->init_boot ? res->init_boot->path : NULL, res->init_boot);
+        print_img(res->vendor_boot ? res->vendor_boot->path : NULL, res->vendor_boot);
+        printf("ARCH:%s\n", res->arch);
+        if (res->android_api)
+            printf("ANDROID:%s (API %d)\n", res->android_version, res->android_api);
+        else
+            printf("ANDROID:%s\n", res->android_version);
+        printf("LAYOUT:%s\n", res->layout);
+        printf("SYSTEM_AS_ROOT:%s\n", yesno(res->system_as_root));
+        printf("GKI:%s\n", yesno(res->gki));
+        printf("SEGMENTS:%d\n", res->n_segments);
+        printf("PATCHED:%s\n", yesno(res->already_patched));
+        printf("TARGET:%s\n", res->target[0] ? res->target : "none");
+        if (res->has_vendor_boot && strcmp(res->target, "vendor_boot") != 0)
+            puts("OPTIONAL:vendor_boot");
         return;
+    }
 
-    puts("");
-    puts("advice");
-    puts("------------------------------------------------------------");
-    printf("* %s\n", layout_advice(res->layout));
-    if (res->system_as_root)
-        puts("* system-as-root: ramdisk files vanish once init switches root to "
-             "/system - have your rc copy them out on post-fs-data.");
-    else
-        puts("* legacy root layout: injected files stay visible in / after boot.");
-    if (res->gki)
-        puts("* GKI device: never touch the kernel - only the ramdisk is patched.");
-    if (res->recovery_fragment)
-        puts("* vendor_boot holds a RECOVERY fragment: add --patch-vendor-boot to "
-             "reach recovery/fastbootd.");
-    if (res->already_patched)
-        puts("! image already carries a veritpath payload (--force to re-inject)");
-    if (strcmp(res->arch, "unknown") == 0)
-        puts("! arch unknown: init_boot.img has no kernel, supply boot.img too");
+    print_rich(res);
 }
