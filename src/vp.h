@@ -168,7 +168,8 @@ typedef struct {
 
 void boot_img_init(boot_img_t *img);
 void boot_img_free(boot_img_t *img);
-int boot_img_parse(const uint8_t *data, size_t len, const char *role, boot_img_t *img);
+int boot_img_parse(const uint8_t *data, size_t len, const char *role,
+                   const char *path, boot_img_t *img);
 int boot_img_pack(boot_img_t *img, buf_t *out);
 const char *boot_img_cmdline(boot_img_t *img);
 int boot_img_append_cmdline(boot_img_t *img, const char *extra);

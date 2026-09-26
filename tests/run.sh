@@ -56,21 +56,23 @@ if [ "$HAVE_PY" = 1 ]; then
     echo "== analyze"
     out=$("$BIN" analyze --boot "$IMG/boot.img" --init-boot "$IMG/init_boot.img" \
           --vendor-boot "$IMG/vendor_boot.img")
-    check "arch detected"        "$(grep -c 'arm64' <<<"$out")" "1"
-    check "layout is init_boot"  "$(grep -c 'ramdisk_layout         init_boot' <<<"$out")" "1"
-    check "target is init_boot"  "$(grep -c 'injection target     init_boot' <<<"$out")" "1"
-    check "system-as-root"       "$(grep -c 'system_as_root  *true' <<<"$out")" "1"
+    check "arch detected"        "$(grep -c '^ARCH:arm64$' <<<"$out")" "1"
+    check "layout is init_boot"  "$(grep -c '^LAYOUT:init_boot$' <<<"$out")" "1"
+    check "target is init_boot"  "$(grep -c '^TARGET:init_boot$' <<<"$out")" "1"
+    check "system-as-root"       "$(grep -c '^SYSTEM_AS_ROOT:1$' <<<"$out")" "1"
+    check "brief lists each image" "$(grep -c '^\[' <<<"$out")" "3"
 
     out=$("$BIN" analyze --boot "$IMG/boot.img" --init-boot "$IMG/init_boot.img" --json)
     check "json output parses"   "$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["target"])' <<<"$out")" "init_boot"
 
     out=$("$BIN" analyze --boot "$IMG/boot.img" --vendor-boot "$IMG/vendor_boot.img")
-    check "vendor_boot layout"   "$(grep -c 'ramdisk_layout         vendor_boot' <<<"$out")" "1"
+    check "vendor_boot layout"   "$(grep -c '^LAYOUT:vendor_boot$' <<<"$out")" "1"
 
     # --------------------------------------------------------------- plan
     echo "== plan"
     out=$("$BIN" plan --init-boot "$IMG/init_boot.img" -p "$PYPROJ/payloads/example-su" --permissive)
     check "plan lists payload"   "$(grep -c 'payload-file' <<<"$out")" "1"
+    check "plan names selinux"   "$(grep -c 'permissive' <<<"$out")" "1"
     check "plan has selinux"     "$(grep -c 'androidboot.selinux=permissive' <<<"$out")" "1"
     check "plan is read only"    "$([ -e "$IMG/init_boot.veritpath.img" ] && echo yes || echo no)" "no"
 
@@ -208,6 +210,55 @@ for name in sorted(os.listdir(sys.argv[2])):
     assert a.find("/su") is not None, name
     assert b"import /init.veritpath.rc" in a.find("/init.rc").data, name
 print("  ok   python verifies every quirky header was patched correctly")
+PYEOF
+pass=$((pass + 1))
+
+# ------------------------------------------------------------ large images
+echo "== large GKI images (a real GKI 1.0 boot.img is ~192MB)"
+python3 - "$PYPROJ" "$WORK/big" <<'PYEOF'
+import gzip, os, struct, sys
+sys.path.insert(0, sys.argv[1])
+from veritpath import compression
+from veritpath.cpio import CpioArchive, CpioEntry
+arch = CpioArchive.empty()
+arch.add(CpioEntry(name="init", mode=0o100755, data=b"#!/system/bin/sh\n"))
+arch.add(CpioEntry(name="init.rc", mode=0o100644, data=b"on early-init\n"))
+rd = compression.compress(arch.serialize(), "gzip")
+kernel = gzip.compress(b"MZ" + b"ARM64" + os.urandom(120 * 1024 * 1024), 1)
+page = 4096
+ru = lambda v, a: (v + a - 1) // a * a
+hdr = bytearray(1584)
+hdr[0:8] = b"ANDROID!"
+struct.pack_into("<I", hdr, 8, len(kernel))
+struct.pack_into("<I", hdr, 12, len(rd))
+struct.pack_into("<I", hdr, 20, 1584)
+struct.pack_into("<I", hdr, 24, 4)
+out = bytearray(hdr); out += bytes(ru(1584, page) - 1584)
+out += kernel; out += bytes(ru(len(kernel), page) - len(kernel))
+out += rd
+d = sys.argv[2] + "/"
+os.makedirs(d, exist_ok=True)
+open(d + "large.img", "wb").write(bytes(out))
+sab = bytearray(out)
+struct.pack_into("<I", sab, 24, 0x11223344)
+struct.pack_into("<I", sab, 40, 0x55667788)
+open(d + "large_sabotaged.img", "wb").write(bytes(sab))
+print("  ok   built %d MB image" % (len(out) // 1024 // 1024))
+PYEOF
+for f in large large_sabotaged; do
+    if "$BIN" analyze --boot "$WORK/big/$f.img" > "$WORK/$f.out" 2>&1; then
+        ok "parses $f.img"
+    else
+        bad "parses $f.img"
+    fi
+    check "$f reports v4" "$(grep -c '^HEADER_VER:4$' <"$WORK/$f.out")" "1"
+    check "$f finds arm64" "$(grep -c '^ARCH:arm64$' <"$WORK/$f.out")" "1"
+done
+python3 - "$BIN" "$WORK/big/large.img" <<'PYEOF'
+import subprocess, sys
+out = subprocess.run([sys.argv[1], "hexdump", sys.argv[2]], capture_output=True, text=True).stdout
+assert "MAGIC8:414e44524f494421" in out, out
+print("  ok   hexdump works on a large image")
 PYEOF
 pass=$((pass + 1))
 

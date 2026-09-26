@@ -42,7 +42,28 @@ bash build-android.sh arm64-v8a
 可选依赖（有就自动启用，没有也能编）：`lzma.h` → xz/lzma，`bzlib.h` → bzip2，
 `zstd.h` → zstd。检测逻辑在 Makefile 里，不需要配置。
 
+**诊断命令**：镜像解析不了时先查它到底是什么：
+
+```bash
+veritpath hexdump boot.img     # 前 64 字节 hex + 关键偏移 + 判定结果
+```
+
+## 输出格式
+
+`analyze` 默认 magiskboot 风格 `KEY:VALUE`，一行一项、无颜色无装饰，便于
+`grep`；`-v` 追加 findings 与对策建议；`--json` 输出结构化结果。
+
 ## 用法
+
+```
+veritpath hexdump <image>              dump header bytes (diagnostics)
+veritpath analyze --boot boot.img ...  KEY:VALUE summary
+veritpath plan    -p payload ...       dry-run injection plan
+veritpath inject  -p payload -o out    patch and write
+veritpath unpack <image> -d dir        unpack a ramdisk
+veritpath repack <dir> -o image        rebuild
+```
+
 
 ```bash
 # 判定布局

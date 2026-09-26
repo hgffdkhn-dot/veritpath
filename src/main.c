@@ -1,5 +1,6 @@
 /* veritpath command line interface. */
 #include "vp.h"
+uint32_t vp_detect_header_version(const uint8_t *d, size_t len, const char *path);
 
 #include <getopt.h>
 #include <stdlib.h>
@@ -17,6 +18,7 @@ static void usage(void)
     puts("  inject    inject a payload and write a patched image");
     puts("  unpack    unpack an image into a directory");
     puts("  repack    rebuild an image from a directory");
+    puts("  hexdump   dump the first 64 header bytes (diagnostics)");
     puts("");
     puts("input options:");
     puts("  --boot FILE          boot.img");
@@ -136,8 +138,7 @@ static int load_images(args_t *a, image_set_t *set)
             return -1;
         }
         boot_img_t *img = xmalloc(sizeof(boot_img_t));
-        if (boot_img_parse(data.data, data.len, spec[i].role, img) != 0) {
-            vp_err("%s: not a recognised Android boot image", spec[i].path);
+        if (boot_img_parse(data.data, data.len, spec[i].role, spec[i].path, img) != 0) {
             boot_img_free(img);
             free(img);
             buf_free(&data);
@@ -238,6 +239,81 @@ static char *out_path_for(const char *src, const char *output, const char *role,
         return res;
     }
     return xstrdup(output);
+}
+
+static int cmd_hexdump(args_t *a)
+{
+    const char *path = a->positional;
+    if (!path) {
+        vp_err("usage: veritpath hexdump <image>");
+        return 1;
+    }
+    buf_t data;
+    buf_init(&data);
+    if (read_file(path, &data) != 0) {
+        vp_err("cannot read %s", path);
+        buf_free(&data);
+        return 1;
+    }
+    printf("FILE:%s\n", path);
+    printf("SIZE:%zu\n", data.len);
+
+    size_t n = data.len < 64 ? data.len : 64;
+    char hex[64 * 3 + 1];
+    char txt[65];
+    size_t p = 0;
+    for (size_t i = 0; i < n; i++) {
+        p += (size_t)snprintf(hex + p, sizeof(hex) - p, "%02x ", data.data[i]);
+        txt[i] = (data.data[i] >= 32 && data.data[i] < 127) ? (char)data.data[i] : '.';
+    }
+    txt[n] = 0;
+    printf("HEAD64:%s\n", hex);
+    printf("ASCII :%s\n", txt);
+
+    char mhex[17];
+    for (int i = 0; i < 8 && i < (int)n; i++)
+        snprintf(mhex + i * 2, 3, "%02x", data.data[i]);
+    if (n < 8)
+        mhex[n * 2] = 0;
+    char mascii[9];
+    for (int i = 0; i < 8 && i < (int)n; i++)
+        mascii[i] = (data.data[i] >= 32 && data.data[i] < 127) ? (char)data.data[i] : '.';
+    mascii[n < 8 ? n : 8] = 0;
+    printf("MAGIC8:%s  |%s|\n", mhex, mascii);
+
+    puts("--- fields ---");
+    static const struct {
+        size_t off;
+        const char *label;
+    } f[] = {
+        {8, "kernel_size"},
+        {12, "ramdisk_size"},
+        {16, "second_size|os_version"},
+        {20, "header_size  (@20)"},
+        {24, "header_ver   (@24)"},
+        {36, "page_size    (@36)"},
+        {40, "header_ver   (@40)"},
+    };
+    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
+        if (data.len >= f[i].off + 4) {
+            const uint8_t *q = data.data + f[i].off;
+            uint32_t v = (uint32_t)q[0] | ((uint32_t)q[1] << 8) |
+                         ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+            printf("  +%-3zu %-22s %u\n", f[i].off, f[i].label, v);
+        } else {
+            printf("  +%-3zu %-22s (eof)\n", f[i].off, f[i].label);
+        }
+    }
+
+    puts("--- verdict ---");
+    uint32_t hv = vp_detect_header_version(data.data, data.len, path);
+    if (hv == 0xFFFFFFFFu)
+        puts("detect_header_version:FAILED (no layout fits)");
+    else
+        printf("detect_header_version:%u\n", hv);
+
+    buf_free(&data);
+    return 0;
 }
 
 static int cmd_analyze(args_t *a)
@@ -427,8 +503,7 @@ static int cmd_unpack(args_t *a)
         return 1;
     }
     boot_img_t img;
-    if (boot_img_parse(data.data, data.len, NULL, &img) != 0) {
-        vp_err("%s: not a recognised Android boot image", img_path);
+    if (boot_img_parse(data.data, data.len, NULL, img_path, &img) != 0) {
         boot_img_free(&img);
         buf_free(&data);
         return 1;
@@ -502,8 +577,7 @@ static int cmd_repack(args_t *a)
     }
     free(orig);
     boot_img_t img;
-    if (boot_img_parse(data.data, data.len, NULL, &img) != 0) {
-        vp_err("original.img is not a valid boot image");
+    if (boot_img_parse(data.data, data.len, NULL, orig, &img) != 0) {
         buf_free(&data);
         return 1;
     }
@@ -565,6 +639,8 @@ int main(int argc, char **argv)
     }
     args_t a;
     parse_args(argc - 1, argv + 1, &a);
+    if (strcmp(cmd, "hexdump") == 0)
+        return cmd_hexdump(&a);
     if (strcmp(cmd, "analyze") == 0)
         return cmd_analyze(&a);
     if (strcmp(cmd, "plan") == 0)

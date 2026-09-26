@@ -86,6 +86,109 @@ void boot_img_free(boot_img_t *img)
 
 #define MAX_MAGIC_SEARCH (1u << 20)
 
+/* Wrappers that are definitely not raw boot images.  Checked before scanning
+ * for the magic: a sparse image or payload.bin carries boot data (and thus the
+ * magic) somewhere inside, but parsing it as a boot image yields nonsense. */
+static const char *identify_container(const uint8_t *d, size_t len)
+{
+    static const uint8_t sparse[4] = {0x3a, 0xff, 0x26, 0xed};
+    static const uint8_t dtb[4] = {0xd0, 0x0d, 0xfe, 0xed};
+    if (len >= 4 && memcmp(d, sparse, 4) == 0)
+        return "sparse";
+    if (len >= 4 && memcmp(d, "CrAU", 4) == 0)
+        return "payload";
+    if (len >= 4 && memcmp(d, "PK\x03\x04", 4) == 0)
+        return "zip";
+    if (len >= 4 && memcmp(d, "AVB0", 4) == 0)
+        return "avb";
+    if (len >= 4 && memcmp(d, "\x7f" "ELF", 4) == 0)
+        return "elf";
+    if (len >= 4 && memcmp(d, dtb, 4) == 0)
+        return "dtb";
+    return NULL;
+}
+
+static void report_container(const char *kind, size_t len, const char *path)
+{
+    const char *name = path ? path : "boot.img";
+    vp_err("%s: not an Android boot image", name);
+    fprintf(stderr, "  size : %zu bytes\n\n", len);
+    if (strcmp(kind, "sparse") == 0) {
+        fprintf(stderr, "  this is an Android *sparse* image - unpack it first:\n");
+        fprintf(stderr, "      simg2img %s %s.raw\n\n", name, name);
+    } else if (strcmp(kind, "payload") == 0) {
+        fprintf(stderr, "  this is a ChromeOS/A/B payload.bin - extract boot first:\n");
+        fprintf(stderr, "      payload-dumper-go payload.bin --part boot\n");
+    } else if (strcmp(kind, "zip") == 0) {
+        fprintf(stderr, "  this is a ZIP archive - extract boot.img first:\n");
+        fprintf(stderr, "      unzip %s\n\n", name);
+    } else if (strcmp(kind, "avb") == 0) {
+        fprintf(stderr, "  this is an AVB structure, not a boot image\n");
+        fprintf(stderr, "      dump the boot/init_boot partition instead of vbmeta\n");
+    } else if (strcmp(kind, "elf") == 0) {
+        fprintf(stderr, "  this is an ELF file (raw kernel / vmlinux), not a boot image\n");
+        fprintf(stderr, "      supply the boot.img that wraps it\n");
+    } else {
+        fprintf(stderr, "  this is a bare device tree blob (dtb), not a boot image\n");
+        fprintf(stderr, "      supply boot.img / init_boot.img instead\n");
+    }
+}
+
+/* How plausible is an Android header at `off`?  A large dump can contain the
+ * magic inside unrelated data, so score every candidate and take the best. */
+static int plausible_page(uint32_t page)
+{
+    if (page == 0 || page == 2048 || page == 4096 || page == 8192 ||
+        page == 16384 || page == 32768 || page == 65536 || page == 131072)
+        return 1;
+    return (page & (page - 1)) == 0 && page >= 2048 && page <= 131072;
+}
+
+static int header_score(const uint8_t *d, size_t len, size_t off)
+{
+    if (off + 64 > len)
+        return -1;
+    if (memcmp(d + off, VENDOR_MAGIC, 8) == 0) {
+        uint32_t hv = rd32(d, off + 8);
+        uint32_t page = rd32(d, off + 12);
+        int score = 90;
+        if (hv == 3 || hv == 4)
+            score += 40;
+        if (plausible_page(page ? page : 4096))
+            score += 20;
+        return score;
+    }
+    if (memcmp(d + off, BOOT_MAGIC, 8) != 0)
+        return -1;
+    uint32_t hv24 = rd32(d, off + 24);
+    uint32_t hs20 = rd32(d, off + 20);
+    uint32_t hv40 = rd32(d, off + 40);
+    uint32_t page = rd32(d, off + 36);
+    int score = 0;
+    if (hv24 == 3 || hv24 == 4 || hv24 == 5 || hv24 == 6) {
+        score += 80;
+        if (hs20 == 0 || (hs20 >= 1500 && hs20 <= 4096))
+            score += 20;
+    }
+    if (hv40 <= 2) {
+        score += 60;
+        if (plausible_page(page))
+            score += 25;
+    }
+    if (score == 0)
+        return 0;
+    uint32_t ksize = rd32(d, off + 8);
+    uint32_t rsize = rd32(d, off + 12);
+    uint32_t total = ksize + rsize;
+    if (!(hv24 == 3 || hv24 == 4 || hv24 == 5 || hv24 == 6))
+        total += rd32(d, off + 24);
+    if ((size_t)total <= len - off)
+        score += 15;
+    else if ((size_t)total > len)
+        score -= 40;
+    return score;
+}
+
 static int find_magic(const uint8_t *d, size_t len, size_t *off)
 {
     /* 1 = ANDROID!, 2 = VNDRBOOT, 0 = not found */
@@ -100,24 +203,27 @@ static int find_magic(const uint8_t *d, size_t len, size_t *off)
         }
     }
     size_t limit = len < MAX_MAGIC_SEARCH ? len : MAX_MAGIC_SEARCH;
-    size_t best = 0;
+    int best_score = 1; /* require a positive score */
     int which = 0;
-    for (size_t i = 0; i + 8 <= limit; i++) {
-        if (memcmp(d + i, BOOT_MAGIC, 8) == 0) {
-            best = i;
-            which = 1;
-            break;
-        }
-    }
-    for (size_t i = 0; i + 8 <= limit; i++) {
-        if (i < best && memcmp(d + i, VENDOR_MAGIC, 8) == 0) {
-            best = i;
-            which = 2;
-            break;
+    size_t best_off = 0;
+    static const struct {
+        const char *magic;
+        int id;
+    } cand[] = {{BOOT_MAGIC, 1}, {VENDOR_MAGIC, 2}};
+    for (int c = 0; c < 2; c++) {
+        for (size_t i = 0; i + 8 <= limit; i++) {
+            if (memcmp(d + i, cand[c].magic, 8) != 0)
+                continue;
+            int score = header_score(d, len, i);
+            if (score > best_score) {
+                best_score = score;
+                best_off = i;
+                which = cand[c].id;
+            }
         }
     }
     if (which)
-        *off = best;
+        *off = best_off;
     return which;
 }
 
@@ -132,54 +238,125 @@ static void print_hex_head(const uint8_t *d, size_t len)
         txt[i] = (d[i] >= 32 && d[i] < 127) ? (char)d[i] : '.';
     }
     txt[n] = 0;
-    vp_err("  head          : %s |%s|", hex, txt);
+    fprintf(stderr, "  head          : %s |%s|\n", hex, txt);
 }
 
 static void report_no_magic(const uint8_t *d, size_t len, const char *path)
 {
     vp_err("%s: not an Android boot image (no ANDROID!/VNDRBOOT magic)",
            path ? path : "<memory>");
-    vp_err("  size          : %zu bytes", len);
+    fprintf(stderr, "  size          : %zu bytes\n", len);
     print_hex_head(d, len);
     static const uint8_t sparse[4] = {0x3a, 0xff, 0x26, 0xed};
     if (len >= 4 && memcmp(d, sparse, 4) == 0) {
-        vp_err("  this is an Android *sparse* image - convert it first:");
-        vp_err("      simg2img %s %s.raw", path ? path : "boot.img",
-               path ? path : "boot.img");
+        fprintf(stderr, "  this is an Android *sparse* image - convert it first:\n");
+        fprintf(stderr, "      simg2img %s %s.raw\n", path ? path : "boot.img",
+                path ? path : "boot.img");
     } else if (len == 0) {
-        vp_err("  the file is empty - the dd / download probably failed");
+        fprintf(stderr, "  the file is empty - the dd / download probably failed\n");
     } else if (len >= 4 && memcmp(d, "CrAU", 4) == 0) {
-        vp_err("  this is a ChromeOS/A/B payload.bin - extract boot first:");
-        vp_err("      payload-dumper-go payload.bin --part boot");
+        fprintf(stderr, "  this is a ChromeOS/A/B payload.bin - extract boot first:\n");
+        fprintf(stderr, "      payload-dumper-go payload.bin --part boot\n");
     } else if (len >= 2 && d[0] == 'P' && d[1] == 'K') {
-        vp_err("  this is a ZIP archive - extract boot.img first");
+        fprintf(stderr, "  this is a ZIP archive - extract boot.img first\n");
     } else {
-        vp_err("  common causes:");
-        vp_err("    * wrong partition dumped (check /dev/block/by-name/)");
-        vp_err("    * the image is compressed - gunzip / xz -d it first");
-        vp_err("    * a partial or truncated dump");
+        fprintf(stderr, "  common causes:\n");
+        fprintf(stderr, "    * wrong partition dumped (check /dev/block/by-name/)\n");
+        fprintf(stderr, "    * the image is compressed - gunzip / xz -d it first\n");
+        fprintf(stderr, "    * a partial or truncated dump\n");
     }
 }
 
 static void report_bad_version(const uint8_t *d, size_t len, const char *path)
 {
     vp_err("%s: cannot determine boot image header version", path ? path : "<memory>");
-    vp_err("  size          : %zu bytes", len);
-    vp_err("  hdr_size  @20 : %u", rd32(d, 20));
-    vp_err("  hdr_ver   @24 : %u", rd32(d, 24));
-    vp_err("  page_size @36 : %u", rd32(d, 36));
-    vp_err("  hdr_ver   @40 : %u", rd32(d, 40));
+    fprintf(stderr, "  size          : %zu bytes\n", len);
+    fprintf(stderr, "  hdr_size  @20 : %u\n", rd32(d, 20));
+    fprintf(stderr, "  hdr_ver   @24 : %u\n", rd32(d, 24));
+    fprintf(stderr, "  page_size @36 : %u\n", rd32(d, 36));
+    fprintf(stderr, "  hdr_ver   @40 : %u\n", rd32(d, 40));
     print_hex_head(d, len);
-    vp_err("  expected: v0-v2 -> version 0/1/2 at @40 with a sane page size at @36");
-    vp_err("            v3/v4 -> version 3/4 at @24 with the header size at @20");
+    fprintf(stderr, "  expected: v0-v2 -> version 0/1/2 at @40, sane page size at @36\n");
+    fprintf(stderr, "            v3/v4 -> version 3/4 at @24, header size at @20\n");
 }
 
-static int plausible_page(uint32_t page)
+/* Recover the header version from the layout itself: try every version and
+ * keep the one whose ramdisk window actually holds a cpio archive (or a
+ * compressed one).  A big GKI 1.0 boot.img must never be rejected just
+ * because its header fields are unusual. */
+static int ramdisk_window(const uint8_t *d, size_t len, int hv,
+                          size_t *off_out, uint32_t *size_out)
 {
-    if (page == 0 || page == 2048 || page == 4096 || page == 8192 ||
-        page == 16384 || page == 32768 || page == 65536 || page == 131072)
+    uint32_t ksize = rd32(d, 8);
+    if (hv <= 2) {
+        uint32_t page = rd32(d, 36);
+        if (!plausible_page(page))
+            page = 2048;
+        if (!page)
+            page = 2048;
+        size_t hs = boot_header_size((uint32_t)hv);
+        if (hv >= 1 && len >= 1648) {
+            uint32_t declared = rd32(d, 1644);
+            if (declared == 1632 || declared == 1648 || declared == 1660)
+                hs = declared;
+        }
+        size_t span = hs;
+        if (span < page)
+            span = page;
+        span = round_up_sz(span, page);
+        *off_out = round_up_sz(span + ksize, page);
+        *size_out = rd32(d, 16);
+    } else {
+        uint32_t declared = rd32(d, 20);
+        size_t hs = boot_header_size((uint32_t)hv);
+        if (declared >= 1500 && declared <= 4096)
+            hs = declared;
+        size_t span = round_up_sz(hs, 4096);
+        *off_out = round_up_sz(span + ksize, 4096);
+        *size_out = rd32(d, 12);
+    }
+    return *size_out != 0 && *off_out + (size_t)*size_out <= len;
+}
+
+static int looks_like_ramdisk(const uint8_t *d, size_t len)
+{
+    if (!d || !len)
+        return 0;
+    if (len >= 6 && (memcmp(d, "070701", 6) == 0 || memcmp(d, "070702", 6) == 0))
         return 1;
-    return (page & (page - 1)) == 0 && page >= 2048 && page <= 131072;
+    return comp_detect(d, len) != FMT_RAW;
+}
+
+static int infer_header_version(const uint8_t *d, size_t len, const char **why)
+{
+    static const int order[] = {0, 1, 2, 4, 3};
+    for (int i = 0; i < 5; i++) {
+        size_t off;
+        uint32_t size;
+        if (!ramdisk_window(d, len, order[i], &off, &size))
+            continue;
+        if (looks_like_ramdisk(d + off, size)) {
+            *why = "ramdisk payload decodes for this layout";
+            return order[i];
+        }
+    }
+    for (int i = 0; i < 5; i++) {
+        size_t off;
+        uint32_t size;
+        if (ramdisk_window(d, len, order[i], &off, &size)) {
+            *why = "kernel+ramdisk sizes fit this layout";
+            return order[i];
+        }
+    }
+    *why = NULL;
+    return -1;
+}
+
+static uint32_t detect_header_version(const uint8_t *d, size_t len, const char *path);
+
+uint32_t vp_detect_header_version(const uint8_t *d, size_t len, const char *path)
+{
+    return detect_header_version(d, len, path);
 }
 
 static uint32_t detect_header_version(const uint8_t *d, size_t len, const char *path)
@@ -213,6 +390,16 @@ static uint32_t detect_header_version(const uint8_t *d, size_t len, const char *
         return hv40;
     if (hv40 <= 2)
         return hv40;
+
+    /* quick checks failed - recover the version from the layout instead of
+     * refusing the image */
+    const char *why = NULL;
+    int guess = infer_header_version(d, len, &why);
+    if (guess >= 0) {
+        vp_warn("%s: header fields unrecognised, recovered v%d from the layout (%s)",
+                path ? path : "<memory>", guess, why ? why : "?");
+        return (uint32_t)guess;
+    }
     report_bad_version(d, len, path);
     return 0xFFFFFFFFu;
 }
@@ -296,6 +483,9 @@ static int parse_v3(const uint8_t *d, size_t len, boot_img_t *img)
     uint32_t rsize = rd32(d, 12);
     img->os_version = rd32(d, 16);
     uint32_t declared = rd32(d, 20);
+    uint32_t on_disk = rd32(d, 24);
+    if (on_disk == 3 || on_disk == 4 || on_disk == 5 || on_disk == 6)
+        img->header_version = on_disk;
     size_t hsize = boot_header_size(img->header_version);
     /* vendor tools write page-padded / zeroed / garbage header sizes */
     if (declared >= 1500 && declared <= 4096)
@@ -389,13 +579,20 @@ static int parse_vendor(const uint8_t *d, size_t len, boot_img_t *img)
     return 0;
 }
 
-int boot_img_parse(const uint8_t *data, size_t len, const char *role, boot_img_t *img)
+int boot_img_parse(const uint8_t *data, size_t len, const char *role,
+                   const char *path, boot_img_t *img)
 {
     boot_img_init(img);
     if (role)
         snprintf(img->role, sizeof(img->role), "%s", role);
+    img->path = path;
 
     size_t off = 0;
+    const char *container = identify_container(data, len);
+    if (container) {
+        report_container(container, len, img->path);
+        return -1;
+    }
     int magic = find_magic(data, len, &off);
     if (magic == 0) {
         /* maybe it is a compressed boot.img (some ROM zips ship boot.img.gz) */

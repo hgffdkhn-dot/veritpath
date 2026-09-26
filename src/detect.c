@@ -278,9 +278,50 @@ static const char *layout_advice(const char *layout)
            "that actually contains one.";
 }
 
-static void print_finding(const char *key, const char *value)
+static void print_img(const char *path, const boot_img_t *img)
 {
-    printf("  %-22s %s\n", key, value);
+    if (!img)
+        return;
+    printf("[%s]\n", path ? path : img->role);
+    printf("HEADER_VER:%u\n", img->header_version);
+    if (!img->is_vendor) {
+        if (img->kernel.len) {
+            printf("KERNEL_SZ:%zu\n", img->kernel.len);
+            printf("KERNEL_FMT:%s\n",
+                   comp_name(comp_detect(img->kernel.data, img->kernel.len)));
+        }
+        if (img->second.len)
+            printf("SECOND_SZ:%zu\n", img->second.len);
+        if (img->recovery_dtbo.len)
+            printf("RECOV_DTBO_SZ:%zu\n", img->recovery_dtbo.len);
+    }
+    if (img->ramdisk.len) {
+        printf("RAMDISK_SZ:%zu\n", img->ramdisk.len);
+        printf("RAMDISK_FMT:%s\n",
+               comp_name(comp_detect(img->ramdisk.data, img->ramdisk.len)));
+    }
+    if (img->dtb.len)
+        printf("DTB_SZ:%zu\n", img->dtb.len);
+    printf("PAGE_SIZE:%u\n", img->page_size);
+    const char *cl = boot_img_cmdline((boot_img_t *)img);
+    if (cl) {
+        while (*cl == ' ')
+            cl++;
+        if (*cl)
+            printf("CMDLINE:%s\n", cl);
+    }
+    if (img->n_frags) {
+        printf("FRAGMENTS:");
+        for (size_t i = 0; i < img->n_frags; i++)
+            printf("%s%s", i ? "," : "", img->frags[i].name);
+        putchar('\n');
+    }
+    putchar('\n');
+}
+
+static const char *yn(int v)
+{
+    return v ? "1" : "0";
 }
 
 void detect_print(analysis_t *res, int as_json)
@@ -299,46 +340,45 @@ void detect_print(analysis_t *res, int as_json)
         printf("}\n");
         return;
     }
-    printf("veritpath %s - boot image analysis\n", VP_VERSION);
-    puts("==============================================================");
-    print_finding("arch", res->arch);
-    char ver[48];
-    snprintf(ver, sizeof(ver), "%s (API %d)", res->android_version, res->android_api);
-    print_finding("android_version", ver);
-    print_finding("ramdisk_layout", res->layout);
-    print_finding("system_as_root", res->system_as_root ? "true" : "false");
-    print_finding("gki", res->gki ? "true" : "false");
-    char seg[32];
-    snprintf(seg, sizeof(seg), "%d", res->n_segments);
-    print_finding("ramdisk_segments", seg);
-    print_finding("already_patched", res->already_patched ? "true" : "false");
-    if (res->slot[0])
-        print_finding("slot", res->slot);
 
-    if (res->boot)
-        print_finding("boot.header_version",
-                      (snprintf(seg, sizeof(seg), "%u", res->boot->header_version), seg));
-    puts("--------------------------------------------------------------");
-    printf("  . %s\n", layout_advice(res->layout));
-    if (res->system_as_root)
-        puts("  . system-as-root: the ramdisk is only the first-stage init, "
-             "/system is mounted as '/'. Inject into the ramdisk, not /system.");
+    /* magiskboot-style: one KEY:VALUE per line, no decoration */
+    print_img(res->boot ? res->boot->path : NULL, res->boot);
+    print_img(res->init_boot ? res->init_boot->path : NULL, res->init_boot);
+    print_img(res->vendor_boot ? res->vendor_boot->path : NULL, res->vendor_boot);
+
+    printf("ARCH:%s\n", res->arch);
+    if (res->android_api)
+        printf("ANDROID:%s (API %d)\n", res->android_version, res->android_api);
     else
-        puts("  . legacy root layout: injected files stay visible in / after boot.");
-    if (res->gki)
-        puts("  . GKI device: never touch the kernel image - only the ramdisk is "
-             "patched.");
-    if (res->recovery_fragment)
-        puts("  . vendor_boot holds a RECOVERY fragment: add --patch-vendor-boot "
-             "if you need the payload inside recovery/fastbootd.");
-    if (res->already_patched)
-        puts("  ! this image already carries a veritpath payload (use --force to "
-             "re-inject)");
-    if (strcmp(res->arch, "unknown") == 0)
-        puts("  ! architecture unknown: supply boot.img as well, init_boot.img "
-             "alone carries no kernel");
-    puts("--------------------------------------------------------------");
-    printf("  injection target     %s\n", res->target[0] ? res->target : "(none)");
+        printf("ANDROID:%s\n", res->android_version);
+    printf("LAYOUT:%s\n", res->layout);
+    printf("SYSTEM_AS_ROOT:%s\n", yn(res->system_as_root));
+    printf("GKI:%s\n", yn(res->gki));
+    printf("SEGMENTS:%d\n", res->n_segments);
+    printf("PATCHED:%s\n", yn(res->already_patched));
+    printf("TARGET:%s\n", res->target[0] ? res->target : "none");
     if (res->has_vendor_boot && strcmp(res->target, "vendor_boot") != 0)
-        puts("  optional targets     vendor_boot");
+        puts("OPTIONAL:vendor_boot");
+
+    if (!vp_verbose)
+        return;
+
+    puts("");
+    puts("advice");
+    puts("------------------------------------------------------------");
+    printf("* %s\n", layout_advice(res->layout));
+    if (res->system_as_root)
+        puts("* system-as-root: ramdisk files vanish once init switches root to "
+             "/system - have your rc copy them out on post-fs-data.");
+    else
+        puts("* legacy root layout: injected files stay visible in / after boot.");
+    if (res->gki)
+        puts("* GKI device: never touch the kernel - only the ramdisk is patched.");
+    if (res->recovery_fragment)
+        puts("* vendor_boot holds a RECOVERY fragment: add --patch-vendor-boot to "
+             "reach recovery/fastbootd.");
+    if (res->already_patched)
+        puts("! image already carries a veritpath payload (--force to re-inject)");
+    if (strcmp(res->arch, "unknown") == 0)
+        puts("! arch unknown: init_boot.img has no kernel, supply boot.img too");
 }
