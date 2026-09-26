@@ -279,6 +279,42 @@ int is_dir(const char *path)
     return S_ISDIR(st.st_mode);
 }
 
+/* directory part of a path ("" when there is none, "." handled by caller) */
+char *path_dirname(const char *path)
+{
+    if (!path)
+        return NULL;
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+        return xstrdup(".");
+    size_t n = (size_t)(slash - path);
+    if (n == 0)
+        return xstrdup("/");
+    char *out = xmalloc(n + 1);
+    memcpy(out, path, n);
+    out[n] = 0;
+    return out;
+}
+
+/* is `dir` one of the colon separated entries of PATH? */
+int dir_in_path(const char *dir, const char *path)
+{
+    if (!dir || !path)
+        return 0;
+    size_t dlen = strlen(dir);
+    const char *p = path;
+    while (*p) {
+        const char *sep = strchr(p, ':');
+        size_t len = sep ? (size_t)(sep - p) : strlen(p);
+        if (len == dlen && strncmp(p, dir, len) == 0)
+            return 1;
+        if (!sep)
+            break;
+        p = sep + 1;
+    }
+    return 0;
+}
+
 char *path_join(const char *a, const char *b)
 {
     size_t la = strlen(a), lb = strlen(b);

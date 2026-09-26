@@ -120,3 +120,7 @@ case ":$PATH:" in
     *) echo "  add to PATH:  export PATH=\"$DEST_DIR:\$PATH\"" ;;
 esac
 echo "  or just run it directly:  $DEST_DIR/veritpath --help"
+echo
+echo "  a bare 'veritpath' only works once the install dir is on your PATH."
+echo "  Otherwise use ./veritpath (from that directory) or the full path above."
+echo "  If it still says 'command not found', run:  hash -r   (bash caches paths)"

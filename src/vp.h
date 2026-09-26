@@ -56,6 +56,8 @@ size_t round_up_sz(size_t v, size_t align);
 const char *human_size(size_t n);       /* static rotating buffer */
 void *vp_memmem(const void *hay, size_t haylen, const void *needle, size_t needlelen);
 char *path_join(const char *a, const char *b);
+char *path_dirname(const char *path);
+int dir_in_path(const char *dir, const char *path);
 char *replace_suffix(const char *path, const char *suffix); /* stem + suffix */
 
 /* ---------------------------------------------------------- compression */

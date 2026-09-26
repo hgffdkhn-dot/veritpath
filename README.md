@@ -7,6 +7,8 @@ correctly.
 
 No Python, no interpreter, no runtime. `adb push` it to a phone and run it.
 
+README in Chinese: [README.zh-CN.md](README.zh-CN.md)
+
 ## Build
 
 ```bash
@@ -74,6 +76,28 @@ dd if=/dev/block/by-name/init_boot_a of=/data/local/tmp/init_boot.img
 
 `/data/local/tmp/` is writable and executable. `/storage/emulated/0` (sdcard)
 is mounted `noexec`, so binaries there never run — copy them out first.
+
+### "command not found" — prefix it with `./`
+
+On many Android devices the current directory is not in `PATH`, so a bare
+`veritpath` is not found even when the binary is right there:
+
+```
+$ veritpath analyze --boot boot.img
+veritpath: inaccessible or not found
+```
+
+Prefix it, or use the full path:
+
+```bash
+./veritpath analyze --boot boot.img
+/data/local/tmp/veritpath analyze --boot boot.img
+```
+
+`command -v veritpath` tells you whether it is on `PATH` at all (only true if
+you ran `install.sh`). After changing `PATH` or deleting an old copy, run
+`hash -r` — bash caches resolved command locations and will otherwise keep
+pointing at a path that no longer exists.
 
 ## Output format
 
@@ -192,6 +216,16 @@ If none of those apply, force a version and see:
 veritpath analyze --boot boot.img --header-version 3
 ```
 
+### `TLS segment is underaligned` on Android
+
+Bionic requires `PT_TLS` alignment >= 64 while a static NDK link emits 8, and
+the loader aborts. `build-android.sh` fixes it automatically; to patch a binary
+by hand:
+
+```bash
+python3 tools/elf_fix.py /data/local/tmp/veritpath
+```
+
 ### `no such file`
 
 The error lists the path it resolved, the working directory, the directory
@@ -199,10 +233,13 @@ contents and a close match, so it is obvious where the mismatch is.
 
 ## Documentation
 
-| Doc | What it covers |
-|---|---|
-| [docs/QUICKSTART.md](docs/QUICKSTART.md) | install, pull an image, inject, flash, troubleshooting |
-| [docs/DEVELOPERS.md](docs/DEVELOPERS.md) | payload format, manifest fields, layout rules, SELinux, exit codes |
+| Doc | Language | What it covers |
+|---|---|---|
+| [README.zh-CN.md](README.zh-CN.md) | Chinese | this page in Chinese |
+| [docs/QUICKSTART.en.md](docs/QUICKSTART.en.md) | English | install, pull an image, inject, flash, troubleshooting |
+| [docs/DEVELOPERS.en.md](docs/DEVELOPERS.en.md) | English | payload format, manifest fields, layout rules, SELinux, exit codes |
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | Chinese | same as QUICKSTART.en, in Chinese |
+| [docs/DEVELOPERS.md](docs/DEVELOPERS.md) | Chinese | same as DEVELOPERS.en, in Chinese |
 
 For payload authors the short version is: a directory with your binaries plus a
 `manifest.json` declaring where each file goes (see `payloads/template/`).
@@ -224,7 +261,7 @@ veritpath verify out/init_boot.veritpath.img -p my-su
 ## Tests
 
 ```bash
-bash tests/run.sh          # 48 checks, self-contained (cc + python3 only)
+bash tests/run.sh          # 68 checks, self-contained (cc + python3 only)
 ```
 
 `tests/imgkit.py` builds the synthetic images and verifies patched output using

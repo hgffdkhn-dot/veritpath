@@ -1,5 +1,7 @@
 # 开发者对接指南
 
+> English: [DEVELOPERS.en.md](DEVELOPERS.en.md)
+
 veritpath **不提供任何 su 实现**。它做的是：拿到你给的文件 → 判断设备布局 →
 决定这些文件该放哪 → 重建一个能启动的镜像。你只需要按约定准备一个 payload 目录。
 
@@ -106,7 +108,7 @@ ls work/ramdisk/          # segment0 / segment1 ...
 veritpath inject --init-boot init_boot.img -p my-su --segment 1 -o out/
 ```
 
-不指定 `--segment` 时，veritpath 选条目最多的那段当主段。
+不指定 `--segment` 时，veritpath 优先选标签为 `main` 的那段，找不到就用最后一段。
 
 **system-as-root 设备**上，init 切根到 `/system` 后 ramdisk 就消失了。你的 rc
 需要在 `on post-fs-data` 把要保留的文件拷到 `/data`。
@@ -171,3 +173,41 @@ fastboot flash init_boot out/init_boot.veritpath.img
   进入 vendor ramdisk，但 fragment 分隔不保留。
 - `arch` 检测依赖 kernel（判断 `ARM64` 魔数）。`init_boot.img` 不带 kernel，
   单独给它时判不出架构，需要同时传 `boot.img`。
+
+## 九、集成到脚本时注意 `./`
+
+**部分安卓设备上裸敲 `veritpath` 是不认的**——当前目录通常不在 `PATH` 里，shell
+不会自动看你在哪个目录：
+
+```
+$ veritpath analyze --boot boot.img
+veritpath: inaccessible or not found
+```
+
+所以在自动化脚本里，别写裸命令，用下面两种之一：
+
+```bash
+./veritpath analyze --boot boot.img                  # 当前目录里有
+/data/local/tmp/veritpath analyze --boot boot.img    # 完整路径，最稳
+```
+
+想在脚本里自动判断该用哪种，可以问 `doctor`：
+
+```bash
+veritpath doctor | grep '^ON_PATH:1$'    # 命中说明可以直接敲裸命令
+```
+
+`doctor` 会打印 `ON_PATH:0/1`，为 0 时还会给一行 `HINT:` 提示改用 `./` 或完整
+路径。脚本里可以这样兜底：
+
+```bash
+if command -v veritpath >/dev/null 2>&1; then
+    VP=veritpath
+else
+    VP=./veritpath
+fi
+"$VP" verify out/init_boot.veritpath.img || exit 1
+```
+
+另外，改过 `PATH` 或删过旧文件之后记得 `hash -r`——bash 会缓存命令的解析结果，
+否则会报 `No such file or directory` 指向一个已经不存在的路径。

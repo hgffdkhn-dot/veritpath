@@ -186,6 +186,9 @@ check "rejects junk image" "$rc" "1"
 check "rejects bad command" "$rc" "1"
 check "version prints" "$("$BIN" --version)" "veritpath 0.2.0"
 check "doctor reports ok"  "$("$BIN" doctor | grep -c 'VERDICT:OK')" "1"
+# invoked as ./name from a dir that is not on PATH, doctor must say so
+check "doctor flags off-PATH use" \
+    "$("$BIN" doctor | grep -c '^ON_PATH:0$')" "1"
 
 head -c 4096 /dev/urandom > "$WORK/random.img"
 err=$("$BIN" analyze --boot "$WORK/random.img" 2>&1 || true)

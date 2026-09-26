@@ -830,6 +830,28 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "doctor") == 0) {
         printf("VERSION:%s\n", VP_VERSION);
         printf("BINARY:%s\n", argv[0]);
+        /* A bare `veritpath` only resolves when its directory is on PATH.
+         * On many Android shells it is not, and users then hit
+         * "inaccessible or not found" even though the binary is right there. */
+        const char *path = getenv("PATH");
+        int on_path = 0;
+        if (path && argv[0]) {
+            if (!strchr(argv[0], '/')) {
+                /* invoked as a bare name: the shell already resolved it,
+                 * so it must have come from PATH */
+                on_path = 1;
+            } else {
+                char *dir = path_dirname(argv[0]);
+                if (dir) {
+                    on_path = dir_in_path(dir, path);
+                    free(dir);
+                }
+            }
+        }
+        printf("ON_PATH:%s\n", on_path ? "1" : "0");
+        if (!on_path)
+            printf("HINT:this directory is not in PATH - run ./veritpath or the "
+                   "full path\n");
         printf("VERDICT:OK\n");
         return 0;
     }

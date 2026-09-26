@@ -1,5 +1,7 @@
 # 快速上手
 
+> English: [QUICKSTART.en.md](QUICKSTART.en.md)
+
 ## 一、装好
 
 三种方式任选，装完都是同一个单文件二进制。
@@ -25,6 +27,50 @@ cp veritpath /data/local/tmp/veritpath && chmod 755 /data/local/tmp/veritpath
 veritpath doctor          # VERSION:0.2.0 / VERDICT:OK
 veritpath --version       # veritpath 0.2.0
 ```
+
+## ⚠ 命令敲了没反应？先加 `./`
+
+**部分安卓设备（以及部分 shell 配置）里，直接敲 `veritpath` 是不认的**，会报：
+
+```
+veritpath: command not found
+veritpath: inaccessible or not found
+```
+
+原因很简单：当前目录**不在 `PATH` 里**，shell 只会去 `PATH` 列出的目录找命令，
+不会自动看你在哪个目录。所以必须显式指路：
+
+```bash
+./veritpath analyze --boot boot.img
+```
+
+或者写完整路径，在任何目录都能跑：
+
+```bash
+/data/local/tmp/veritpath analyze --boot boot.img
+```
+
+下面三种写法都合法，挑顺手的用：
+
+```bash
+./veritpath                      # 当前目录里有
+/data/local/tmp/veritpath        # 完整路径
+veritpath                        # 只有在 PATH 里才行（install.sh 装过才算）
+```
+
+**判断是否装进了 PATH**：
+
+```bash
+command -v veritpath
+```
+
+有输出就说明在 PATH 里，可以直接敲；没输出就用 `./` 或完整路径。
+
+另外两个容易一起踩的坑：
+
+- **改了 PATH 或删了旧文件后，bash 会缓存旧位置**，表现为
+  `No such file or directory`。刷新一下：`hash -r`
+- **`install.sh` 装过之后依然报错**，同理先 `hash -r`
 
 ## 二、在手机上取出镜像
 
