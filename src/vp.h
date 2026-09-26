@@ -156,7 +156,9 @@ typedef struct {
     buf_t kernel, ramdisk, second, dtb, recovery_dtbo, boot_signature;
     buf_t bootconfig;
     buf_t raw_header;
+    buf_t unwrapped;      /* holds a decompressed copy of the source file */
     size_t header_span;
+    size_t header_offset;
     vendor_fragment_t *frags;
     size_t n_frags;
     uint32_t frag_entry_size;

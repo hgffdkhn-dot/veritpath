@@ -172,6 +172,45 @@ PY
     pass=$((pass + 1))
 fi
 
+# ------------------------------------------------------- real-world quirks
+echo "== header quirks (vendor tools / odd dumps)"
+mkdir -p "$WORK/quirks"
+python3 - "$PYPROJ" "$WORK/quirks" <<'PYEOF'
+import gzip, struct, sys
+sys.path.insert(0, sys.argv[1])
+from tests.fixtures import make_init_boot
+base = make_init_boot()
+def patch(off, val):
+    b = bytearray(base); struct.pack_into("<I", b, off, val); return bytes(b)
+d = sys.argv[2] + "/"
+open(d + "hs_padded.img", "wb").write(patch(20, 4096))
+open(d + "hs_zero.img", "wb").write(patch(20, 0))
+open(d + "hs_garbage.img", "wb").write(patch(20, 65536))
+open(d + "hv_future.img", "wb").write(patch(24, 5))
+open(d + "prefix.img", "wb").write(bytes(4096) + base)
+open(d + "gzip.img", "wb").write(gzip.compress(base))
+PYEOF
+for f in hs_padded hs_zero hs_garbage hv_future prefix gzip; do
+    if "$BIN" inject --init-boot "$WORK/quirks/$f.img" \
+        -p "$PYPROJ/payloads/example-su" -o "$WORK/qout" >/dev/null 2>&1; then
+        ok "tolerates $f"
+    else
+        bad "tolerates $f"
+    fi
+done
+python3 - "$PYPROJ" "$WORK/qout" <<'PYEOF'
+import sys, os
+sys.path.insert(0, sys.argv[1])
+from veritpath.bootimg import BootImage
+for name in sorted(os.listdir(sys.argv[2])):
+    img = BootImage.parse(open(os.path.join(sys.argv[2], name), "rb").read(), "init_boot")
+    a = img.ramdisk_archive()
+    assert a.find("/su") is not None, name
+    assert b"import /init.veritpath.rc" in a.find("/init.rc").data, name
+print("  ok   python verifies every quirky header was patched correctly")
+PYEOF
+pass=$((pass + 1))
+
 # ------------------------------------------------------------------ errors
 echo "== error handling"
 head -c 8192 /dev/zero > "$WORK/junk.img"
@@ -180,6 +219,14 @@ check "rejects junk image" "$rc" "1"
 "$BIN" bogus-command >/dev/null 2>&1 && rc=0 || rc=$?
 check "rejects bad command" "$rc" "1"
 check "version prints" "$("$BIN" --version)" "veritpath 0.2.0"
+
+head -c 4096 /dev/urandom > "$WORK/random.img"
+err=$("$BIN" analyze --boot "$WORK/random.img" 2>&1 || true)
+check "explains no magic"   "$(grep -c 'no ANDROID' <<<"$err")" "1"
+printf '\x3a\xff\x26\xed' > "$WORK/sparse.img"
+head -c 4096 /dev/zero >> "$WORK/sparse.img"
+err=$("$BIN" analyze --boot "$WORK/sparse.img" 2>&1 || true)
+check "names sparse images" "$(grep -c 'simg2img' <<<"$err")" "1"
 
 echo
 echo "== $pass passed, $fail failed =="

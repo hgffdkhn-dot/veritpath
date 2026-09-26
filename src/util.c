@@ -112,7 +112,8 @@ void buf_reset(buf_t *b)
 
 int buf_reserve(buf_t *b, size_t extra)
 {
-    if (b->cap - b->len >= extra)
+    /* always keep room for the trailing NUL that buf_append*() writes */
+    if (b->len + extra + 1 <= b->cap)
         return 0;
     size_t need = b->len + extra + 1;
     size_t cap = b->cap ? b->cap : 256;
@@ -284,8 +285,8 @@ char *replace_suffix(const char *path, const char *suffix)
     const char *base = slash ? slash + 1 : path;
     const char *dot = strrchr(base, '.');
     size_t stem = dot ? (size_t)(dot - path) : strlen(path);
-    size_t dirlen = (size_t)(base - path);
-    char *out = xmalloc(dirlen + strlen(suffix) + 1);
+    size_t slen = strlen(suffix);
+    char *out = xmalloc(stem + slen + 1);
     memcpy(out, path, stem);
     memcpy(out + stem, suffix, strlen(suffix) + 1);
     return out;

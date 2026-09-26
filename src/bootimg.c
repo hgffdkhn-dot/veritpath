@@ -62,6 +62,7 @@ void boot_img_init(boot_img_t *img)
     buf_init(&img->boot_signature);
     buf_init(&img->bootconfig);
     buf_init(&img->raw_header);
+    buf_init(&img->unwrapped);
     img->page_size = 4096;
 }
 
@@ -75,6 +76,7 @@ void boot_img_free(boot_img_t *img)
     buf_free(&img->boot_signature);
     buf_free(&img->bootconfig);
     buf_free(&img->raw_header);
+    buf_free(&img->unwrapped);
     for (size_t i = 0; i < img->n_frags; i++)
         free(img->frags[i].board_id);
     free(img->frags);
@@ -82,23 +84,136 @@ void boot_img_free(boot_img_t *img)
     memset(img, 0, sizeof(*img));
 }
 
-static uint32_t detect_header_version(const uint8_t *d, size_t len)
+#define MAX_MAGIC_SEARCH (1u << 20)
+
+static int find_magic(const uint8_t *d, size_t len, size_t *off)
 {
-    if (len < 64)
-        return 0xFFFFFFFFu;
-    uint32_t hv24 = rd32(d, 24);
-    uint32_t size20 = rd32(d, 20);
-    if ((hv24 == 3 || hv24 == 4) &&
-        (size20 >= 1564 && size20 <= 1596))
-        return hv24;
-    uint32_t hv40 = rd32(d, 40);
-    if (hv40 <= 2) {
-        uint32_t page = rd32(d, 36);
-        if (page == 0 || (page >= 2048 && page <= 131072 && (page & (page - 1)) == 0))
-            return hv40;
+    /* 1 = ANDROID!, 2 = VNDRBOOT, 0 = not found */
+    if (len >= 8) {
+        if (memcmp(d, VENDOR_MAGIC, 8) == 0) {
+            *off = 0;
+            return 2;
+        }
+        if (memcmp(d, BOOT_MAGIC, 8) == 0) {
+            *off = 0;
+            return 1;
+        }
     }
-    if (hv24 == 3 || hv24 == 4)
+    size_t limit = len < MAX_MAGIC_SEARCH ? len : MAX_MAGIC_SEARCH;
+    size_t best = 0;
+    int which = 0;
+    for (size_t i = 0; i + 8 <= limit; i++) {
+        if (memcmp(d + i, BOOT_MAGIC, 8) == 0) {
+            best = i;
+            which = 1;
+            break;
+        }
+    }
+    for (size_t i = 0; i + 8 <= limit; i++) {
+        if (i < best && memcmp(d + i, VENDOR_MAGIC, 8) == 0) {
+            best = i;
+            which = 2;
+            break;
+        }
+    }
+    if (which)
+        *off = best;
+    return which;
+}
+
+static void print_hex_head(const uint8_t *d, size_t len)
+{
+    size_t n = len < 16 ? len : 16;
+    char hex[16 * 3 + 1];
+    char txt[17];
+    size_t p = 0;
+    for (size_t i = 0; i < n; i++) {
+        p += (size_t)snprintf(hex + p, sizeof(hex) - p, "%02x ", d[i]);
+        txt[i] = (d[i] >= 32 && d[i] < 127) ? (char)d[i] : '.';
+    }
+    txt[n] = 0;
+    vp_err("  head          : %s |%s|", hex, txt);
+}
+
+static void report_no_magic(const uint8_t *d, size_t len, const char *path)
+{
+    vp_err("%s: not an Android boot image (no ANDROID!/VNDRBOOT magic)",
+           path ? path : "<memory>");
+    vp_err("  size          : %zu bytes", len);
+    print_hex_head(d, len);
+    static const uint8_t sparse[4] = {0x3a, 0xff, 0x26, 0xed};
+    if (len >= 4 && memcmp(d, sparse, 4) == 0) {
+        vp_err("  this is an Android *sparse* image - convert it first:");
+        vp_err("      simg2img %s %s.raw", path ? path : "boot.img",
+               path ? path : "boot.img");
+    } else if (len == 0) {
+        vp_err("  the file is empty - the dd / download probably failed");
+    } else if (len >= 4 && memcmp(d, "CrAU", 4) == 0) {
+        vp_err("  this is a ChromeOS/A/B payload.bin - extract boot first:");
+        vp_err("      payload-dumper-go payload.bin --part boot");
+    } else if (len >= 2 && d[0] == 'P' && d[1] == 'K') {
+        vp_err("  this is a ZIP archive - extract boot.img first");
+    } else {
+        vp_err("  common causes:");
+        vp_err("    * wrong partition dumped (check /dev/block/by-name/)");
+        vp_err("    * the image is compressed - gunzip / xz -d it first");
+        vp_err("    * a partial or truncated dump");
+    }
+}
+
+static void report_bad_version(const uint8_t *d, size_t len, const char *path)
+{
+    vp_err("%s: cannot determine boot image header version", path ? path : "<memory>");
+    vp_err("  size          : %zu bytes", len);
+    vp_err("  hdr_size  @20 : %u", rd32(d, 20));
+    vp_err("  hdr_ver   @24 : %u", rd32(d, 24));
+    vp_err("  page_size @36 : %u", rd32(d, 36));
+    vp_err("  hdr_ver   @40 : %u", rd32(d, 40));
+    print_hex_head(d, len);
+    vp_err("  expected: v0-v2 -> version 0/1/2 at @40 with a sane page size at @36");
+    vp_err("            v3/v4 -> version 3/4 at @24 with the header size at @20");
+}
+
+static int plausible_page(uint32_t page)
+{
+    if (page == 0 || page == 2048 || page == 4096 || page == 8192 ||
+        page == 16384 || page == 32768 || page == 65536 || page == 131072)
+        return 1;
+    return (page & (page - 1)) == 0 && page >= 2048 && page <= 131072;
+}
+
+static uint32_t detect_header_version(const uint8_t *d, size_t len, const char *path)
+{
+    if (len < 64) {
+        report_bad_version(d, len, path);
+        return 0xFFFFFFFFu;
+    }
+    if (memcmp(d, VENDOR_MAGIC, 8) == 0) {
+        uint32_t hv = rd32(d, 8);
+        return (hv == 3 || hv == 4) ? hv : 3;
+    }
+    uint32_t hv24 = rd32(d, 24);
+    uint32_t hs20 = rd32(d, 20);
+    uint32_t hv40 = rd32(d, 40);
+    uint32_t page = rd32(d, 36);
+
+    /* v3/v4: version at 24.  Offset 24 of a legacy header is second_size, and a
+     * 3- or 4-byte second stage does not exist, so this cannot collide.  The
+     * header size is only sanity-checked: vendor tools write page-padded or
+     * zeroed values instead of the canonical 1580/1584. */
+    /* offset 24 of a legacy header is second_size, and a 3..6 byte second
+     * stage cannot exist, so hv24 in that range is decisive for v3/v4 - even
+     * when the cmdline is empty (which makes a v3/v4 header look like a v0
+     * with page_size 0).  The header size at @20 is only sanity-checked later,
+     * vendor tools write page-padded or garbage values. */
+    (void)hs20;
+    if (hv24 == 3 || hv24 == 4 || hv24 == 5 || hv24 == 6)
         return hv24;
+    if (hv40 <= 2 && plausible_page(page))
+        return hv40;
+    if (hv40 <= 2)
+        return hv40;
+    report_bad_version(d, len, path);
     return 0xFFFFFFFFu;
 }
 
@@ -180,9 +295,11 @@ static int parse_v3(const uint8_t *d, size_t len, boot_img_t *img)
     uint32_t ksize = rd32(d, 8);
     uint32_t rsize = rd32(d, 12);
     img->os_version = rd32(d, 16);
-    size_t hsize = rd32(d, 20);
-    if (hsize < 1580 || hsize > len)
-        hsize = boot_header_size(img->header_version);
+    uint32_t declared = rd32(d, 20);
+    size_t hsize = boot_header_size(img->header_version);
+    /* vendor tools write page-padded / zeroed / garbage header sizes */
+    if (declared >= 1500 && declared <= 4096)
+        hsize = declared;
     store_cstr(d + 28, 1536, img->cmdline, sizeof(img->cmdline));
     img->page_size = 4096;
     img->header_span = round_up_sz(hsize, img->page_size);
@@ -277,11 +394,44 @@ int boot_img_parse(const uint8_t *data, size_t len, const char *role, boot_img_t
     boot_img_init(img);
     if (role)
         snprintf(img->role, sizeof(img->role), "%s", role);
-    if (len >= 8 && memcmp(data, VENDOR_MAGIC, 8) == 0)
-        return parse_vendor(data, len, img);
-    if (len < 8 || memcmp(data, BOOT_MAGIC, 8) != 0)
+
+    size_t off = 0;
+    int magic = find_magic(data, len, &off);
+    if (magic == 0) {
+        /* maybe it is a compressed boot.img (some ROM zips ship boot.img.gz) */
+        buf_t raw;
+        buf_init(&raw);
+        if (comp_decompress(data, len, &raw) == 0 && raw.len >= 64) {
+            size_t off2 = 0;
+            int magic2 = find_magic(raw.data, raw.len, &off2);
+            if (magic2) {
+                img->unwrapped = raw;
+                img->header_offset = off2;
+                data = raw.data + off2;
+                len = raw.len - off2;
+                magic = magic2;
+            } else {
+                buf_free(&raw);
+            }
+        } else {
+            buf_free(&raw);
+        }
+    }
+    if (magic == 0) {
+        report_no_magic(data, len, img->path);
         return -1;
-    img->header_version = detect_header_version(data, len);
+    }
+    if (off) {
+        img->header_offset = off;
+        vp_warn("%s: ANDROID! header found at offset %zu - skipping a prefix",
+                img->path ? img->path : "<memory>", off);
+        data += off;
+        len -= off;
+    }
+
+    if (magic == 2)
+        return parse_vendor(data, len, img);
+    img->header_version = detect_header_version(data, len, img->path);
     if (img->header_version == 0xFFFFFFFFu)
         return -1;
     if (img->header_version <= 2)
@@ -377,6 +527,8 @@ int boot_img_ramdisk_archive(boot_img_t *img, cpio_archive_t *a)
         return -1;
     buf_t raw;
     buf_init(&raw);
+    /* the archive may be read more than once (detection, then injection) */
+    free(img->chunk_fmts);
     img->chunk_fmts = xmalloc(sizeof(comp_fmt_t) * chunks.n);
     img->n_chunks = chunks.n;
     for (size_t i = 0; i < chunks.n; i++) {
