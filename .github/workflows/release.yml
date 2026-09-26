@@ -63,6 +63,14 @@ jobs:
       - name: Build every Android ABI
         run: bash build-android.sh
 
+      - name: Verify the binaries Android will actually load
+        run: |
+          rc=0
+          for f in dist/veritpath-android-*; do
+            python3 tools/elf_fix.py --check "$f" || rc=1
+          done
+          exit $rc
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-android

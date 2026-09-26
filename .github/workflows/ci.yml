@@ -68,6 +68,19 @@ jobs:
           ls -l dist/
           file dist/veritpath-android-* || true
 
+      # Android aborts a static binary whose PT_TLS alignment is 8, and refuses
+      # anything that is not PIE. Verify both so a regression fails here rather
+      # than on a user's phone.
+      - name: Verify the binaries Android will actually load
+        run: |
+          rc=0
+          for f in dist/veritpath-android-*; do
+            [ -f "$f" ] || continue
+            echo "--- $f"
+            python3 tools/elf_fix.py --check "$f" || rc=1
+          done
+          exit $rc
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-android

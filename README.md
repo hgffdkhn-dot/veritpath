@@ -98,6 +98,30 @@ OPTIONAL:vendor_boot
 
 `-v` appends findings and advice; `--json` prints structured output.
 
+## Android quirks handled for you
+
+`build-android.sh` post-processes each binary because Android refuses to load
+an ordinary static Linux executable:
+
+| Check | Why |
+|---|---|
+| `PT_TLS` alignment ≥ 64 (32-bit: ≥ 32) | Bionic aborts with `executable's TLS segment is underaligned`; NDK lld emits 8 |
+| `ET_DYN` (PIE) | Android 5+ refuses `ET_EXEC`; a static link can come out non-PIE, in which case the script relinks dynamically |
+| `PT_LOAD` aligned to 16384 | Android 15+ devices with 16KB pages require it |
+
+`tools/elf_fix.py` does the patching with nothing but the standard library
+(the same job as `termux-elf-cleaner`), and `--check` reports all three:
+
+```bash
+python3 tools/elf_fix.py --check dist/veritpath-android-arm64-v8a
+```
+
+Patching an already-built binary by hand:
+
+```bash
+python3 tools/elf_fix.py /data/local/tmp/veritpath
+```
+
 ## Troubleshooting
 
 ### `cannot determine boot image header version`

@@ -106,6 +106,17 @@ ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
 
 WANT="${1:-all}"
 built=0
+
+# Android quirks that have to be handled after linking:
+#   * Bionic insists on PT_TLS alignment >= 64 (32-bit: >= 32); lld emits 8
+#     for static binaries, and the loader aborts with
+#     "executable's TLS segment is underaligned".
+#   * Android 5+ only loads PIE (ET_DYN); a static link can come out ET_EXEC.
+#   * Android 15+ devices may use 16KB pages, so ask for that alignment too.
+TLSFIX="$ROOT/tools/elf_fix.py"
+COMMON_FLAGS=(-O2 -std=c11 -Wall -Wextra -Isrc -D_GNU_SOURCE
+              -Wl,-z,max-page-size=16384)
+
 for i in "${!ABIS[@]}"; do
     abi="${ABIS[$i]}"
     triple="${TRIPLES[$i]}"
@@ -113,16 +124,32 @@ for i in "${!ABIS[@]}"; do
         continue
     fi
     echo "==> building $abi"
+    target="$OUT/veritpath-android-$abi"
+
     if [ "$ON_DEVICE" = 1 ]; then
-        "$CC_BIN" -O2 -std=c11 -Wall -Wextra -static -Isrc -D_GNU_SOURCE \
-            "${SRCS[@]}" -lz -o "$OUT/veritpath-android-$abi"
+        "$CC_BIN" "${COMMON_FLAGS[@]}" -static "${SRCS[@]}" -lz -o "$target"
     else
-        "$CC_BIN" --target="${triple}${API}" -O2 -std=c11 -Wall -Wextra -static \
-            -Isrc -D_GNU_SOURCE "${SRCS[@]}" -lz \
-            -o "$OUT/veritpath-android-$abi"
+        "$CC_BIN" --target="${triple}${API}" "${COMMON_FLAGS[@]}" -static \
+            "${SRCS[@]}" -lz -o "$target"
     fi
-    chmod +x "$OUT/veritpath-android-$abi"
-    echo "    -> $OUT/veritpath-android-$abi"
+
+    # fix the TLS alignment, then make sure the result is PIE
+    python3 "$TLSFIX" "$target" | sed 's/^/        /'
+    if ! python3 "$TLSFIX" --check "$target" >/dev/null 2>&1; then
+        # usually means the static link is not PIE - relink dynamically, which
+        # is how native Android executables are normally built anyway
+        echo "        relinking $abi as PIE against Bionic"
+        if [ "$ON_DEVICE" = 1 ]; then
+            "$CC_BIN" "${COMMON_FLAGS[@]}" -pie "${SRCS[@]}" -lz -o "$target"
+        else
+            "$CC_BIN" --target="${triple}${API}" "${COMMON_FLAGS[@]}" -pie \
+                "${SRCS[@]}" -lz -o "$target"
+        fi
+        python3 "$TLSFIX" "$target" | sed 's/^/        /'
+    fi
+
+    chmod +x "$target"
+    echo "    -> $target"
     built=$((built + 1))
 done
 
