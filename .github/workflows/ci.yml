@@ -99,6 +99,34 @@ jobs:
           name: smoke-images
           path: samples/out/
 
+  portable:
+    name: zipapp + portable bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: build portable bundle
+        run: bash scripts/build-android.sh
+      - name: run the launcher end to end
+        run: |
+          python scripts/make_sample_images.py samples
+          cd dist/veritpath-portable
+          sh veritpath analyze --boot ../../samples/boot.img \
+            --init-boot ../../samples/init_boot.img
+          sh veritpath inject --init-boot ../../samples/init_boot.img \
+            --payload payloads/example-su -o out
+          ls -l out
+      - name: install into a temp prefix
+        run: |
+          sh dist/veritpath-portable/install.sh --prefix "$RUNNER_TEMP/vp"
+          "$RUNNER_TEMP/vp/bin/veritpath" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: veritpath-portable
+          path: dist/veritpath-portable/
+
   build:
     name: binary (${{ matrix.os }})
     needs: test

@@ -57,6 +57,25 @@ veritpath repack work -o init_boot.new.img
 python scripts/make_sample_images.py samples
 ```
 
+## 在 Android / Linux 上运行
+
+手机里直接跑不起来？那是因为 veritpath 是 Python 项目，而 Android 原生 shell 没有
+Python，且 `/storage/emulated/0` 是 noexec 分区。三种正确姿势见
+[docs/ANDROID.md](docs/ANDROID.md)，最省事的是在电脑上处理完再刷回手机。
+
+手机上（Termux）想直接跑：
+
+```bash
+pkg install python
+bash scripts/build-android.sh          # 电脑上生成 dist/veritpath-portable/
+adb push dist/veritpath-portable /sdcard/veritpath
+cp -r /storage/emulated/0/veritpath ~/veritpath && cd ~/veritpath
+sh install.sh            # 装到 $PREFIX/bin，之后直接 veritpath ...
+sh veritpath analyze --boot boot.img      # 不装也能用（sdcard 上亦可）
+```
+
+Linux 上三种零依赖用法（`pip install -e .` / `python3 veritpath.pyz` / portable 包）。
+
 ## 命令
 
 | 命令 | 作用 |
@@ -122,8 +141,8 @@ veritpath/
 │   ├── injector.py     # 解包 → 注入 → 重打包 → 写记录
 │   └── cli.py          # analyze / plan / inject / unpack / repack
 ├── payloads/example-su # 示例 payload（占位 su，换成你自己的二进制）
-├── docs/               # PAYLOAD.md / ARCHITECTURE.md
-├── scripts/            # 合成镜像生成器、PyInstaller 打包脚本
+├── docs/               # PAYLOAD.md / ARCHITECTURE.md / ANDROID.md
+├── scripts/            # 合成镜像生成器、zipapp/portable 打包、安装脚本
 ├── tests/              # 43 项单元与端到端测试（含合成镜像）
 └── .github/workflows/  # CI + Release
 ```
@@ -135,7 +154,8 @@ make install   # pip install -e ".[dev]"
 make test      # pytest
 make lint      # ruff check + format --check
 make samples   # 生成合成镜像
-make build     # PyInstaller 单文件二进制
+make build     # PyInstaller 单文件二进制（Linux/macOS/Windows）
+	@echo "make portable  zipapp + shell launcher（Android / Linux 通用）"
 ```
 
 GitHub Actions（已写好，推上去即可用）：

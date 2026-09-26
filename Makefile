@@ -1,7 +1,7 @@
 PYTHON ?= python3
 PYINSTALLER ?= pyinstaller
 
-.PHONY: help install test lint fmt samples build clean ci
+.PHONY: help install test lint fmt samples zipapp portable build clean ci
 
 help:
 	@echo "make install   安装到当前环境（含 dev 依赖）"
@@ -9,6 +9,8 @@ help:
 	@echo "make lint      ruff 检查"
 	@echo "make fmt       自动格式化"
 	@echo "make samples   生成合成镜像到 samples/"
+	@echo "make zipapp    打成单文件 veritpath.pyz（任何 python3 可跑）"
+	@echo "make portable  产出 Android/Linux 通用包 dist/veritpath-portable/"
 	@echo "make build     PyInstaller 打包单文件二进制到 dist/"
 	@echo "make ci        等价于 lint + test"
 	@echo "make clean     清理构建产物"
@@ -29,6 +31,12 @@ fmt:
 
 samples:
 	$(PYTHON) scripts/make_sample_images.py samples
+
+zipapp:
+	$(PYTHON) scripts/make_zipapp.py dist/veritpath.pyz
+
+portable:
+	bash scripts/build-android.sh
 
 build:
 	$(PYTHON) -m pip install pyinstaller
