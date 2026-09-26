@@ -1,0 +1,581 @@
+/* veritpath command line interface. */
+#include "vp.h"
+
+#include <getopt.h>
+#include <stdlib.h>
+
+static void usage(void)
+{
+    puts("veritpath - analyze boot/init_boot/vendor_boot images and inject "
+         "third-party payloads");
+    puts("");
+    puts("usage: veritpath <command> [options]");
+    puts("");
+    puts("commands:");
+    puts("  analyze   detect arch / layout and report the injection target");
+    puts("  plan      print the injection plan (dry run)");
+    puts("  inject    inject a payload and write a patched image");
+    puts("  unpack    unpack an image into a directory");
+    puts("  repack    rebuild an image from a directory");
+    puts("");
+    puts("input options:");
+    puts("  --boot FILE          boot.img");
+    puts("  --init-boot FILE     init_boot.img (Android 13+)");
+    puts("  --vendor-boot FILE   vendor_boot.img");
+    puts("  --recovery FILE      recovery.img");
+    puts("");
+    puts("inject/plan options:");
+    puts("  -p, --payload DIR    payload directory");
+    puts("  -o, --output PATH    output file or directory");
+    puts("      --patch-vendor-boot   also patch the vendor ramdisk");
+    puts("      --permissive     add androidboot.selinux=permissive");
+    puts("      --cmdline TOKENS extra kernel cmdline tokens");
+    puts("      --segment N      cpio segment index to patch");
+    puts("      --format NAME    force ramdisk compression (gzip|lz4|lz4_legacy|xz|...)");
+    puts("      --force          ignore compatibility checks and double injection");
+    puts("      --no-backup      do not keep a backup of the original image");
+    puts("      --dry-run        patch in memory only, write nothing");
+    puts("      --json           machine readable output");
+    puts("");
+    puts("examples:");
+    puts("  veritpath analyze --boot boot.img --init-boot init_boot.img");
+    puts("  veritpath plan --init-boot init_boot.img -p payloads/example-su");
+    puts("  veritpath inject --init-boot init_boot.img -p payloads/example-su -o out/");
+    puts("  veritpath unpack init_boot.img -d work/ && veritpath repack work -o new.img");
+}
+
+static const struct option kLongOpts[] = {
+    {"boot", required_argument, 0, 'B'},
+    {"init-boot", required_argument, 0, 'I'},
+    {"vendor-boot", required_argument, 0, 'V'},
+    {"recovery", required_argument, 0, 'R'},
+    {"payload", required_argument, 0, 'p'},
+    {"output", required_argument, 0, 'o'},
+    {"dir", required_argument, 0, 'd'},
+    {"patch-vendor-boot", no_argument, 0, 'P'},
+    {"permissive", no_argument, 0, 'S'},
+    {"cmdline", required_argument, 0, 'c'},
+    {"segment", required_argument, 0, 'g'},
+    {"format", required_argument, 0, 'F'},
+    {"force", no_argument, 0, 'f'},
+    {"no-backup", no_argument, 0, 'n'},
+    {"dry-run", no_argument, 0, 'D'},
+    {"json", no_argument, 0, 'j'},
+    {"verbose", no_argument, 0, 'v'},
+    {"help", no_argument, 0, 'h'},
+    {0, 0, 0, 0},
+};
+
+typedef struct {
+    const char *boot, *init_boot, *vendor_boot, *recovery;
+    const char *payload, *output, *dir;
+    const char *positional;          /* unpack <image> / repack <dir> */
+    options_t opts;
+    int json;
+} args_t;
+
+static void parse_args(int argc, char **argv, args_t *a)
+{
+    memset(a, 0, sizeof(*a));
+    options_init(&a->opts);
+    optind = 1;
+    for (;;) {
+        int c = getopt_long(argc, argv, "p:o:d:B:I:V:R:c:g:F:fDnPjSvh", kLongOpts, NULL);
+        if (c == -1)
+            break;
+        switch (c) {
+        case 'B': a->boot = optarg; break;
+        case 'I': a->init_boot = optarg; break;
+        case 'V': a->vendor_boot = optarg; break;
+        case 'R': a->recovery = optarg; break;
+        case 'p': a->payload = optarg; break;
+        case 'o': a->output = optarg; break;
+        case 'd': a->dir = optarg; break;
+        case 'P': a->opts.patch_vendor_boot = 1; break;
+        case 'S': a->opts.permissive = 1; break;
+        case 'c': a->opts.cmdline = optarg; break;
+        case 'g': a->opts.segment = atoi(optarg); break;
+        case 'F': a->opts.ramdisk_format = comp_from_name(optarg); break;
+        case 'f': a->opts.force = 1; break;
+        case 'n': a->opts.no_backup = 1; break;
+        case 'D': a->opts.dry_run = 1; break;
+        case 'j': a->json = 1; break;
+        case 'v': vp_set_verbose(1); break;
+        case 'h': usage(); exit(0);
+        default: break;
+        }
+    }
+    if (optind < argc)
+        a->positional = argv[optind];
+}
+
+static boot_img_t *g_imgs[VP_MAX_IMAGES];
+static const char *g_roles[VP_MAX_IMAGES];
+static size_t g_n;
+
+static int load_images(args_t *a, image_set_t *set)
+{
+    struct {
+        const char *role;
+        const char *path;
+    } spec[] = {
+        {"boot", a->boot},
+        {"init_boot", a->init_boot},
+        {"vendor_boot", a->vendor_boot},
+        {"recovery", a->recovery},
+    };
+    g_n = 0;
+    for (size_t i = 0; i < 4; i++) {
+        if (!spec[i].path)
+            continue;
+        buf_t data;
+        buf_init(&data);
+        if (read_file(spec[i].path, &data) != 0) {
+            vp_err("cannot read %s", spec[i].path);
+            buf_free(&data);
+            return -1;
+        }
+        boot_img_t *img = xmalloc(sizeof(boot_img_t));
+        if (boot_img_parse(data.data, data.len, spec[i].role, img) != 0) {
+            vp_err("%s: not a recognised Android boot image", spec[i].path);
+            boot_img_free(img);
+            free(img);
+            buf_free(&data);
+            return -1;
+        }
+        img->path = spec[i].path;
+        buf_free(&data);
+        g_imgs[g_n] = img;
+        g_roles[g_n] = spec[i].role;
+        set[g_n].img = img;
+        set[g_n].role = spec[i].role;
+        g_n++;
+    }
+    if (g_n == 0) {
+        vp_err("no input images given (use --boot/--init-boot/--vendor-boot)");
+        return -1;
+    }
+    return 0;
+}
+
+static void free_images(void)
+{
+    for (size_t i = 0; i < g_n; i++) {
+        boot_img_free(g_imgs[i]);
+        free(g_imgs[i]);
+    }
+    g_n = 0;
+}
+
+static boot_img_t *img_by_role(const char *role)
+{
+    for (size_t i = 0; i < g_n; i++) {
+        if (strcmp(g_roles[i], role) == 0)
+            return g_imgs[i];
+    }
+    return NULL;
+}
+
+static void mkdir_p_for(const char *path)
+{
+    char *copy = xstrdup(path);
+    char *slash = strrchr(copy, '/');
+    if (slash) {
+        *slash = 0;
+        if (*copy)
+            mkdir_p(copy);
+    }
+    free(copy);
+}
+
+static void backup_original(const char *src)
+{
+    buf_t data;
+    buf_init(&data);
+    if (read_file(src, &data) != 0) {
+        buf_free(&data);
+        return;
+    }
+    char *bak = xmalloc(strlen(src) + 32);
+    sprintf(bak, "%s.veritpath.bak", src);
+    if (write_file(bak, data.data, data.len) == 0)
+        vp_log("backup of %s -> %s", src, bak);
+    free(bak);
+    buf_free(&data);
+}
+
+static const char *base_name(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static char *out_path_for(const char *src, const char *output, const char *role,
+                          int multiple)
+{
+    const char *base = base_name(src);
+    char name[256];
+    if (multiple) {
+        snprintf(name, sizeof(name), "%s.veritpath.img", role);
+    } else {
+        char *stemmed = replace_suffix(base, ".veritpath.img");
+        snprintf(name, sizeof(name), "%s", stemmed);
+        free(stemmed);
+    }
+    if (!output)
+        return replace_suffix(src, ".veritpath.img");
+    /* treat as a directory when it is one, or when it has no extension yet */
+    int as_dir = is_dir(output) || (!file_exists(output) && !strchr(base_name(output), '.'));
+    if (as_dir) {
+        mkdir_p(output);
+        return path_join(output, name);
+    }
+    if (multiple) {
+        char *stem = replace_suffix(output, "");
+        char *res = xmalloc(strlen(stem) + strlen(role) + 16);
+        sprintf(res, "%s.%s.img", stem, role);
+        free(stem);
+        return res;
+    }
+    return xstrdup(output);
+}
+
+static int cmd_analyze(args_t *a)
+{
+    image_set_t set[VP_MAX_IMAGES];
+    if (load_images(a, set) != 0)
+        return 1;
+    analysis_t res;
+    detect_analyze(set, g_n, &res);
+    detect_print(&res, a->json);
+    free_images();
+    return 0;
+}
+
+static int cmd_plan(args_t *a)
+{
+    image_set_t set[VP_MAX_IMAGES];
+    if (load_images(a, set) != 0)
+        return 1;
+    analysis_t res;
+    detect_analyze(set, g_n, &res);
+    payload_t p;
+    int have_payload = 0;
+    if (a->payload) {
+        if (payload_load(a->payload, &p) != 0) {
+            vp_err("cannot load payload from %s", a->payload);
+            free_images();
+            return 1;
+        }
+        have_payload = 1;
+        char msg[512];
+        if (payload_check(&p, res.arch, res.android_api, msg, sizeof(msg)) && !a->opts.force) {
+            vp_err("payload incompatible: %s", msg);
+            vp_err("pass --force to inject anyway");
+            payload_free(&p);
+            free_images();
+            return 1;
+        }
+        if (msg[0])
+            vp_warn("%s", msg);
+    }
+    strategy_print_plan(&res, have_payload ? &p : NULL, &a->opts, a->json);
+    if (have_payload)
+        payload_free(&p);
+    free_images();
+    return 0;
+}
+
+static int cmd_inject(args_t *a)
+{
+    image_set_t set[VP_MAX_IMAGES];
+    if (load_images(a, set) != 0)
+        return 1;
+    analysis_t res;
+    detect_analyze(set, g_n, &res);
+    payload_t p;
+    if (!a->payload) {
+        vp_err("inject needs --payload DIR");
+        free_images();
+        return 1;
+    }
+    if (payload_load(a->payload, &p) != 0) {
+        vp_err("cannot load payload from %s", a->payload);
+        free_images();
+        return 1;
+    }
+    char msg[512];
+    if (payload_check(&p, res.arch, res.android_api, msg, sizeof(msg)) && !a->opts.force) {
+        vp_err("payload incompatible: %s", msg);
+        vp_err("pass --force to inject anyway");
+        payload_free(&p);
+        free_images();
+        return 1;
+    }
+    if (msg[0])
+        vp_warn("%s", msg);
+
+    strategy_print_plan(&res, &p, &a->opts, a->json);
+    putchar('\n');
+
+    if (!res.target[0]) {
+        vp_err("no ramdisk found in any supplied image - nothing to inject");
+        payload_free(&p);
+        free_images();
+        return 1;
+    }
+    if (res.already_patched && !a->opts.force) {
+        vp_err("image already carries a veritpath payload; use --force to re-inject");
+        payload_free(&p);
+        free_images();
+        return 1;
+    }
+
+    /* which images get patched */
+    const char *targets[VP_MAX_IMAGES];
+    size_t ntargets = 0;
+    targets[ntargets++] = res.target;
+    if (a->opts.patch_vendor_boot && strcmp(res.target, "vendor_boot") != 0 &&
+        img_by_role("vendor_boot"))
+        targets[ntargets++] = "vendor_boot";
+
+    for (size_t t = 0; t < ntargets; t++) {
+        boot_img_t *img = img_by_role(targets[t]);
+        if (!img)
+            continue;
+        cpio_archive_t arc;
+        cpio_init(&arc);
+        if (boot_img_ramdisk_archive(img, &arc) != 0) {
+            vp_err("%s: cannot read ramdisk", targets[t]);
+            cpio_free(&arc);
+            continue;
+        }
+        size_t seg = a->opts.segment >= 0 ? (size_t)a->opts.segment : cpio_main_segment(&arc);
+        if (seg >= arc.n)
+            seg = arc.n - 1;
+
+        inject_result_t r;
+        memset(&r, 0, sizeof(r));
+        /* vendor_boot: every fragment needs the payload */
+        if (img->is_vendor && arc.n > 1) {
+            for (size_t s = 0; s < arc.n; s++)
+                payload_apply(&arc, s, &p, &r, a->opts.permissive, a->opts.cmdline);
+        } else {
+            payload_apply(&arc, seg, &p, &r, a->opts.permissive, a->opts.cmdline);
+        }
+        boot_img_set_ramdisk(img, &arc, a->opts.ramdisk_format);
+
+        if (t == 0) {
+            if (a->opts.permissive)
+                boot_img_append_cmdline(img, "androidboot.selinux=permissive");
+            if (a->opts.cmdline)
+                boot_img_append_cmdline(img, a->opts.cmdline);
+            if (p.cmdline_append[0])
+                boot_img_append_cmdline(img, p.cmdline_append);
+        }
+
+        if (a->opts.dry_run) {
+            vp_log("[%s] dry run - nothing written", targets[t]);
+            cpio_free(&arc);
+            continue;
+        }
+
+        buf_t packed;
+        buf_init(&packed);
+        boot_img_pack(img, &packed);
+        char *out = out_path_for(img->path, a->output, targets[t], ntargets > 1);
+        if (!a->opts.no_backup)
+            backup_original(img->path);
+        mkdir_p_for(out);
+        if (write_file(out, packed.data, packed.len) != 0) {
+            vp_err("cannot write %s", out);
+        } else {
+            vp_log("wrote %s (%s)", out, human_size(packed.len));
+            printf("  [%s] -> %s\n", targets[t], out);
+            for (int i = 0; i < r.n_added; i++)
+                printf("    added    %s\n", r.added[i]);
+            for (int i = 0; i < r.n_replaced; i++)
+                printf("    replaced %s\n", r.replaced[i]);
+            for (int i = 0; i < r.n_backed; i++)
+                printf("    kept     %s\n", r.backed_up[i]);
+        }
+        buf_free(&packed);
+        free(out);
+        cpio_free(&arc);
+    }
+    payload_free(&p);
+    free_images();
+    return 0;
+}
+
+static int cmd_unpack(args_t *a)
+{
+    if (!a->dir) {
+        vp_err("unpack needs -d DIR");
+        return 1;
+    }
+    const char *img_path = a->positional ? a->positional
+                                         : (a->boot ? a->boot : a->init_boot);
+    if (!img_path) {
+        vp_err("usage: veritpath unpack <image> -d <dir>");
+        return 1;
+    }
+    buf_t data;
+    buf_init(&data);
+    if (read_file(img_path, &data) != 0) {
+        vp_err("cannot read %s", img_path);
+        return 1;
+    }
+    boot_img_t img;
+    if (boot_img_parse(data.data, data.len, NULL, &img) != 0) {
+        vp_err("%s: not a recognised Android boot image", img_path);
+        boot_img_free(&img);
+        buf_free(&data);
+        return 1;
+    }
+    mkdir_p(a->dir);
+    /* keep the original so repack can restore header/kernel/cmdline */
+    char *orig = path_join(a->dir, "original.img");
+    write_file(orig, data.data, data.len);
+    free(orig);
+
+    if (img.kernel.len) {
+        char *p = path_join(a->dir, "kernel");
+        write_file(p, img.kernel.data, img.kernel.len);
+        free(p);
+    }
+    if (img.dtb.len) {
+        char *p = path_join(a->dir, "dtb");
+        write_file(p, img.dtb.data, img.dtb.len);
+        free(p);
+    }
+    if (img.bootconfig.len) {
+        char *p = path_join(a->dir, "bootconfig");
+        write_file(p, img.bootconfig.data, img.bootconfig.len);
+        free(p);
+    }
+    if (img.ramdisk.len) {
+        cpio_archive_t arc;
+        cpio_init(&arc);
+        if (boot_img_ramdisk_archive(&img, &arc) == 0) {
+            char *rd = path_join(a->dir, "ramdisk");
+            mkdir_p(rd);
+            cpio_extract_dir(&arc, rd);
+            char *cp = path_join(a->dir, "ramdisk.cpio");
+            buf_t raw;
+            buf_init(&raw);
+            cpio_serialize(&arc, &raw);
+            write_file(cp, raw.data, raw.len);
+            buf_free(&raw);
+            free(cp);
+            free(rd);
+            vp_log("unpacked %s into %s (%zu entries)", img_path, a->dir,
+                   arc.segs[0].n);
+            cpio_free(&arc);
+        }
+    }
+    printf("  kernel    %s\n", human_size(img.kernel.len));
+    printf("  ramdisk   %s\n", human_size(img.ramdisk.len));
+    printf("  dtb       %s\n", human_size(img.dtb.len));
+    boot_img_free(&img);
+    buf_free(&data);
+    return 0;
+}
+
+static int cmd_repack(args_t *a)
+{
+    const char *dir = a->positional ? a->positional : a->dir;
+    if (!dir || !a->output) {
+        vp_err("usage: veritpath repack <dir> -o <output>");
+        return 1;
+    }
+    a->dir = dir;
+    char *orig = path_join(a->dir, "original.img");
+    buf_t data;
+    buf_init(&data);
+    if (read_file(orig, &data) != 0) {
+        vp_err("%s missing - only directories created by 'veritpath unpack' can be "
+               "repacked",
+               orig);
+        free(orig);
+        return 1;
+    }
+    free(orig);
+    boot_img_t img;
+    if (boot_img_parse(data.data, data.len, NULL, &img) != 0) {
+        vp_err("original.img is not a valid boot image");
+        buf_free(&data);
+        return 1;
+    }
+    char *rd = path_join(a->dir, "ramdisk");
+    if (is_dir(rd)) {
+        cpio_archive_t arc;
+        cpio_init(&arc);
+        cpio_build_dir(rd, &arc);
+        boot_img_set_ramdisk(&img, &arc, -1);
+        vp_log("rebuilt ramdisk from %s", rd);
+        cpio_free(&arc);
+    }
+    free(rd);
+    char *kp = path_join(a->dir, "kernel");
+    if (file_exists(kp) && !img.is_vendor) {
+        buf_t k;
+        buf_init(&k);
+        if (read_file(kp, &k) == 0) {
+            buf_reset(&img.kernel);
+            buf_append(&img.kernel, k.data, k.len);
+        }
+        buf_free(&k);
+    }
+    free(kp);
+
+    buf_t packed;
+    buf_init(&packed);
+    boot_img_pack(&img, &packed);
+    mkdir_p_for(a->output);
+    if (write_file(a->output, packed.data, packed.len) != 0) {
+        vp_err("cannot write %s", a->output);
+        buf_free(&packed);
+        boot_img_free(&img);
+        buf_free(&data);
+        return 1;
+    }
+    vp_log("wrote %s (%s)", a->output, human_size(packed.len));
+    buf_free(&packed);
+    boot_img_free(&img);
+    buf_free(&data);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) {
+        usage();
+        return 1;
+    }
+    const char *cmd = argv[1];
+    if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0 ||
+        strcmp(cmd, "help") == 0) {
+        usage();
+        return 0;
+    }
+    if (strcmp(cmd, "--version") == 0 || strcmp(cmd, "version") == 0) {
+        printf("veritpath %s\n", VP_VERSION);
+        return 0;
+    }
+    args_t a;
+    parse_args(argc - 1, argv + 1, &a);
+    if (strcmp(cmd, "analyze") == 0)
+        return cmd_analyze(&a);
+    if (strcmp(cmd, "plan") == 0)
+        return cmd_plan(&a);
+    if (strcmp(cmd, "inject") == 0)
+        return cmd_inject(&a);
+    if (strcmp(cmd, "unpack") == 0)
+        return cmd_unpack(&a);
+    if (strcmp(cmd, "repack") == 0)
+        return cmd_repack(&a);
+    vp_err("unknown command: %s", cmd);
+    usage();
+    return 1;
+}

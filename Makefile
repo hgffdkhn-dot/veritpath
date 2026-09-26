@@ -1,49 +1,75 @@
-PYTHON ?= python3
-PYINSTALLER ?= pyinstaller
+# veritpath - plain make, no cmake, no autotools.
+#
+#   make                build build/veritpath
+#   make static         fully static Linux binary (glibc or musl)
+#   make android        cross build for Android with the NDK (see build-android.sh)
+#   make install        install to $PREFIX (default /usr/local)
+#   make clean
+#
+# Optional compression backends are auto-detected from the headers present:
+#   lzma.h  -> xz/lzma    bzlib.h -> bzip2    zstd.h -> zstd
+# zlib (gzip) is required - every libc and the Android NDK ship it.
 
-.PHONY: help install test lint fmt samples zipapp portable build clean ci
+CC      ?= cc
+PREFIX  ?= /usr/local
+CFLAGS  ?= -O2 -std=c11 -Wall -Wextra
+LDFLAGS ?=
+LDLIBS  ?= -lz
 
-help:
-	@echo "make install   安装到当前环境（含 dev 依赖）"
-	@echo "make test      运行单元测试"
-	@echo "make lint      ruff 检查"
-	@echo "make fmt       自动格式化"
-	@echo "make samples   生成合成镜像到 samples/"
-	@echo "make zipapp    打成单文件 veritpath.pyz（任何 python3 可跑）"
-	@echo "make portable  产出 Android/Linux 通用包 dist/veritpath-portable/"
-	@echo "make build     PyInstaller 打包单文件二进制到 dist/"
-	@echo "make ci        等价于 lint + test"
-	@echo "make clean     清理构建产物"
+SRCDIR  := src
+OBJDIR  := build
+BINDIR  := build
 
-install:
-	$(PYTHON) -m pip install -e ".[dev]"
+SRCS := $(SRCDIR)/main.c $(SRCDIR)/util.c $(SRCDIR)/compress.c $(SRCDIR)/cpio.c \
+        $(SRCDIR)/bootimg.c $(SRCDIR)/detect.c $(SRCDIR)/json.c \
+        $(SRCDIR)/payload.c $(SRCDIR)/strategy.c
+OBJS := $(SRCS:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
+TARGET := $(BINDIR)/veritpath
 
-test:
-	$(PYTHON) -m pytest tests/ -q
+DEFS :=
+ifneq ($(wildcard /usr/include/lzma.h /usr/local/include/lzma.h),)
+DEFS += -DHAVE_LZMA
+LDLIBS += -llzma
+endif
+ifneq ($(wildcard /usr/include/bzlib.h /usr/local/include/bzlib.h),)
+DEFS += -DHAVE_BZIP2
+LDLIBS += -lbz2
+endif
+ifneq ($(wildcard /usr/include/zstd.h /usr/local/include/zstd.h),)
+DEFS += -DHAVE_ZSTD
+LDLIBS += -lzstd
+endif
 
-lint:
-	$(PYTHON) -m ruff check .
-	$(PYTHON) -m ruff format --check .
+ALL_CFLAGS := $(CFLAGS) $(DEFS) -I$(SRCDIR) -D_GNU_SOURCE
 
-fmt:
-	$(PYTHON) -m ruff check --fix .
-	$(PYTHON) -m ruff format .
+.PHONY: all static android install clean test
 
-samples:
-	$(PYTHON) scripts/make_sample_images.py samples
+all: $(TARGET)
 
-zipapp:
-	$(PYTHON) scripts/make_zipapp.py dist/veritpath.pyz
+$(OBJDIR):
+	@mkdir -p $(OBJDIR)
 
-portable:
-	bash scripts/build-android.sh
+$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
+	$(CC) $(ALL_CFLAGS) -c $< -o $@
 
-build:
-	$(PYTHON) -m pip install pyinstaller
-	bash scripts/build.sh dist
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) $(OBJS) $(LDLIBS) -o $@
+	@echo "built $@"
+	@$(TARGET) --version
 
-ci: lint test
+static:
+	$(MAKE) clean
+	$(MAKE) all LDFLAGS="-static"
+
+android:
+	bash build-android.sh
+
+install: $(TARGET)
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/veritpath
+
+test: $(TARGET)
+	bash tests/run.sh
 
 clean:
-	rm -rf build dist samples *.egg-info .pytest_cache .ruff_cache
-	find . -name __pycache__ -type d -prune -exec rm -rf {} +
+	rm -rf $(OBJDIR)

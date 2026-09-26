@@ -7,73 +7,86 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "tag to build (e.g. v0.1.0)"
+        description: "tag to build (e.g. v0.2.0)"
         required: true
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: binary (${{ matrix.asset }})
+  linux:
+    name: linux static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make static
+      - run: mkdir -p artifacts && cp build/veritpath artifacts/veritpath-linux-x86_64-static
+      - uses: actions/upload-artifact@v4
+        with:
+          name: veritpath-linux-x86_64-static
+          path: artifacts/veritpath-linux-x86_64-static
+
+  macos:
+    name: macos ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            asset: veritpath-linux-x86_64
-          - os: macos-13
-            asset: veritpath-macos-x86_64
           - os: macos-latest
-            asset: veritpath-macos-arm64
-          - os: windows-latest
-            asset: veritpath-windows-x86_64.exe
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: install
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller .
-      - name: build
-        shell: bash
-        run: bash scripts/build.sh dist
-      - name: package
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          if [ -f dist/veritpath.exe ]; then
-            cp dist/veritpath.exe "artifacts/${{ matrix.asset }}"
-          else
-            cp dist/veritpath "artifacts/${{ matrix.asset }}"
-            chmod +x "artifacts/${{ matrix.asset }}"
-          fi
+      - run: make
+      - run: bash tests/run.sh build/veritpath
+      - run: mkdir -p artifacts && cp build/veritpath artifacts/veritpath-macos-${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: artifacts/${{ matrix.asset }}
+          name: veritpath-macos-${{ matrix.arch }}
+          path: artifacts/veritpath-macos-${{ matrix.arch }}
 
-  sdist:
-    name: sdist + wheel
+  android:
+    name: android ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+      - run: bash build-android.sh ${{ matrix.abi }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - run: mkdir -p artifacts && cp dist/veritpath-android-${{ matrix.abi }} artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: veritpath-android-${{ matrix.abi }}
+          path: artifacts/veritpath-android-${{ matrix.abi }}
+
+  source:
+    name: source tarball
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python -m pip install --upgrade pip build
-      - run: python -m build
+      - run: |
+          mkdir -p artifacts
+          tar czf artifacts/veritpath-src.tar.gz \
+            --exclude=.git --exclude=build --exclude=dist \
+            src tests Makefile build-android.sh README.md
       - uses: actions/upload-artifact@v4
         with:
-          name: python-dist
-          path: dist/
+          name: veritpath-src
+          path: artifacts/veritpath-src.tar.gz
 
   release:
-    name: publish github release
-    needs: [build, sdist]
+    name: publish
+    needs: [linux, macos, android, source]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,13 +94,11 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: create release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: veritpath ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
-          files: |
-            artifacts/*
+          files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,15 +1,5 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
 build/
 dist/
-samples/
-.venv/
-venv/
-.pytest_cache/
-.ruff_cache/
-*.veritpath.bak
-*.veritpath.json
+*.o
 *.img
-!payloads/**/*.img
-.DS_Store
+!tests/**/*.img

@@ -12,178 +12,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: lint (ruff)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python -m pip install --upgrade pip ruff
-      - run: ruff check .
-      - run: ruff format --check .
-
-  test:
-    name: test (py${{ matrix.python }} / ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
-        include:
-          - os: macos-latest
-            python-version: "3.11"
-          - os: windows-latest
-            python-version: "3.11"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: install
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
-      - name: unit tests
-        run: python -m pytest tests/ -q
-
-  smoke:
-    name: end-to-end smoke
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python -m pip install --upgrade pip && python -m pip install -e .
-      - name: generate synthetic images
-        run: python scripts/make_sample_images.py samples
-      - name: analyze (json)
-        run: |
-          python -m veritpath analyze \
-            --boot samples/boot.img \
-            --init-boot samples/init_boot.img \
-            --vendor-boot samples/vendor_boot.img --json | tee analyze.json
-      - name: plan
-        run: |
-          python -m veritpath plan \
-            --boot samples/boot.img \
-            --init-boot samples/init_boot.img \
-            --vendor-boot samples/vendor_boot.img \
-            --payload payloads/example-su --permissive
-      - name: inject
-        run: |
-          python -m veritpath inject \
-            --boot samples/boot.img \
-            --init-boot samples/init_boot.img \
-            --vendor-boot samples/vendor_boot.img \
-            --payload payloads/example-su \
-            --permissive --patch-vendor-boot -o samples/out
-      - name: verify the patched images
-        run: |
-          python - <<'PY'
-          from veritpath.bootimg import BootImage, VendorBootImage
-          init = BootImage.parse(open("samples/out/init_boot.veritpath.img","rb").read(), "init_boot")
-          files = init.ramdisk_archive().names()
-          assert "su" in files, files
-          assert "init.veritpath.rc" in files, files
-          assert "androidboot.selinux=permissive" in init.full_cmdline
-          vendor = VendorBootImage.parse(open("samples/out/vendor_boot.veritpath.img","rb").read())
-          assert sum(e.size for e in vendor.table) == len(vendor.ramdisk)
-          print("smoke ok:", files)
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: smoke-images
-          path: samples/out/
-
-  portable:
-    name: zipapp + portable bundle
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: build portable bundle
-        run: bash scripts/build-android.sh
-      - name: run the launcher end to end
-        run: |
-          python scripts/make_sample_images.py samples
-          cd dist/veritpath-portable
-          sh veritpath analyze --boot ../../samples/boot.img \
-            --init-boot ../../samples/init_boot.img
-          sh veritpath inject --init-boot ../../samples/init_boot.img \
-            --payload payloads/example-su -o out
-          ls -l out
-      - name: install into a temp prefix
-        run: |
-          sh dist/veritpath-portable/install.sh --prefix "$RUNNER_TEMP/vp"
-          "$RUNNER_TEMP/vp/bin/veritpath" --version
-      - uses: actions/upload-artifact@v4
-        with:
-          name: veritpath-portable
-          path: dist/veritpath-portable/
-
-  build:
-    name: binary (${{ matrix.os }})
-    needs: test
+  build-test:
+    name: build & test (${{ matrix.os }}, ${{ matrix.cc }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            asset: veritpath-linux-x86_64
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
           - os: macos-latest
-            asset: veritpath-macos-arm64
-          - os: windows-latest
-            asset: veritpath-windows-x86_64.exe
+            cc: clang
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: install pyinstaller
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller .
-      - name: build single file binary
-        shell: bash
-        run: bash scripts/build.sh dist
-      - name: rename with platform suffix
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          if [ -f dist/veritpath.exe ]; then
-            cp dist/veritpath.exe "artifacts/${{ matrix.asset }}"
-          else
-            cp dist/veritpath "artifacts/${{ matrix.asset }}"
-            chmod +x "artifacts/${{ matrix.asset }}"
-          fi
-      - name: smoke test the binary
-        shell: bash
-        run: |
-          if [ -f dist/veritpath.exe ]; then ./dist/veritpath.exe --version; else ./dist/veritpath --version; fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: artifacts/${{ matrix.asset }}
+      - name: build
+        run: make CC=${{ matrix.cc }}
+      - name: regression tests
+        run: bash tests/run.sh build/veritpath
+      - name: build strictly (warnings as errors)
+        run: make clean && make CC=${{ matrix.cc }} CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror"
 
-  dist:
-    name: sdist + wheel
+  static:
+    name: static linux binary
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python -m pip install --upgrade pip build
-      - run: python -m build
+      - run: make static
+      - run: file build/veritpath
       - uses: actions/upload-artifact@v4
         with:
-          name: python-dist
-          path: dist/
+          name: veritpath-linux-x86_64-static
+          path: build/veritpath
+
+  android:
+    name: android (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+      - name: cross build
+        run: bash build-android.sh ${{ matrix.abi }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - run: ls -l dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: veritpath-android-${{ matrix.abi }}
+          path: dist/veritpath-android-${{ matrix.abi }}
