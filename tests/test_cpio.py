@@ -106,3 +106,19 @@ def test_lz4_frame_detected_and_split():
     assert compression.detect(frame) == compression.Format.LZ4
     chunks = compression.split_chunks(frame + frame)
     assert [c[1] for c in chunks] == [data, data]
+
+
+def test_symlink_stub_roundtrip(tmp_path):
+    """Platforms without symlink support keep links as stub files."""
+    archive = CpioArchive.empty()
+    archive.add(CpioEntry(name="init", mode=0o100755, data=b"#!/bin/sh\n"))
+    archive.add(CpioEntry(name="bin/sh", mode=0o120777, data=b"/system/bin/sh"))
+
+    from veritpath.cpio import build_from_dir, extract_to_dir
+
+    extract_to_dir(archive, str(tmp_path / "root"))
+    again = build_from_dir(str(tmp_path / "root"))
+    entry = again.find("/bin/sh")
+    assert entry is not None
+    assert entry.is_symlink
+    assert entry.data == b"/system/bin/sh"

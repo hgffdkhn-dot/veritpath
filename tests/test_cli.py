@@ -91,7 +91,8 @@ def test_unpack_and_repack(tmp_path):
     assert (work / "ramdisk" / "init").is_file()
     assert (work / "header.json").is_file()
 
-    (work / "ramdisk" / "hello.txt").write_text("injected by hand\n")
+    # write bytes: text mode would translate \n into \r\n on Windows
+    (work / "ramdisk" / "hello.txt").write_bytes(b"injected by hand\n")
     rebuilt = tmp_path / "boot.new.img"
     run("repack", str(work), "-o", str(rebuilt))
 

@@ -21,6 +21,9 @@ MAGIC_NEWC_CRC = b"070702"
 TRAILER = "TRAILER!!!"
 HEADER_LEN = 110
 
+# marker used when a symlink cannot be created on disk (Windows)
+SYMLINK_STUB = b"veritpath-symlink:"
+
 
 @dataclass
 class CpioEntry:
@@ -349,10 +352,19 @@ def extract_to_dir(archive: CpioArchive, root: str) -> None:
                 link = entry.data.decode("utf-8", errors="replace")
                 if target.exists() or target.is_symlink():
                     target.unlink()
-                os.symlink(link, target)
+                try:
+                    os.symlink(link, target)
+                except (OSError, NotImplementedError):
+                    # Windows without developer mode / admin rights cannot
+                    # create symlinks: keep the target in a stub file instead,
+                    # build_from_dir() turns it back into a symlink.
+                    target.write_bytes(SYMLINK_STUB + link.encode("utf-8"))
                 continue
             target.write_bytes(entry.data)
-            os.chmod(target, entry.perms)
+            try:
+                os.chmod(target, entry.perms)
+            except (OSError, NotImplementedError):
+                pass
 
 
 def build_from_dir(root: str) -> CpioArchive:
@@ -402,6 +414,10 @@ def _collect(base: Path, root: Path) -> List[CpioEntry]:
                 data = os.readlink(file_path).encode("utf-8")
             elif file_path.is_file():
                 data = file_path.read_bytes()
+                if data.startswith(SYMLINK_STUB):
+                    # symlink stub written by extract_to_dir() on Windows
+                    mode = 0o120777
+                    data = data[len(SYMLINK_STUB) :]
             entries.append(
                 CpioEntry(
                     name=rel_file,
