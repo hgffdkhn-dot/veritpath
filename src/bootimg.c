@@ -1,3 +1,13 @@
+/* veritpath - Android boot image analyzer and payload injector.
+ *
+ * _GNU_SOURCE is defined here rather than on the command line so the sources
+ * compile identically under -std=c11, -std=gnu11 and any cross toolchain:
+ * glibc otherwise hides PATH_MAX, strtok_r, symlink, readlink and lstat.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 /* Android boot image headers v0..v4 and vendor_boot v3..v4. */
 #include "vp.h"
 
@@ -839,7 +849,12 @@ int boot_img_pack(boot_img_t *img, buf_t *out)
         wr32(header.data, 2096, (uint32_t)img->dtb.len);
         char cl[2048];
         memset(cl, 0, sizeof(cl));
-        memcpy(cl, img->cmdline, strnlen(img->cmdline, sizeof(cl) - 1));
+        /* bound by the *source*, not the destination: cmdline is 1600 bytes,
+         * so asking strnlen for 2047 would read past it */
+        size_t clen = strnlen(img->cmdline, sizeof(img->cmdline));
+        if (clen > sizeof(cl) - 1)
+            clen = sizeof(cl) - 1;
+        memcpy(cl, img->cmdline, clen);
         memcpy(header.data + 28, cl, 2048);
         if (img->header_version >= 4) {
             size_t tsize = img->n_frags * img->frag_entry_size;

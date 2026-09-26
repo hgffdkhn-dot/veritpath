@@ -1,3 +1,13 @@
+/* veritpath - Android boot image analyzer and payload injector.
+ *
+ * _GNU_SOURCE is defined here rather than on the command line so the sources
+ * compile identically under -std=c11, -std=gnu11 and any cross toolchain:
+ * glibc otherwise hides PATH_MAX, strtok_r, symlink, readlink and lstat.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 /* cpio "newc" archives, with Android multi-segment support. */
 #include "vp.h"
 
@@ -8,6 +18,75 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+/* --------------------------------------------------------- symlink compat
+ *
+ * MinGW has no symlink()/readlink().  On Windows a symlink is recorded as a
+ * regular file whose contents start with VP_LINK_PREFIX, and is turned back
+ * into a real symlink wherever one is supported.
+ */
+#define VP_LINK_PREFIX "veritpath-symlink:"
+
+/* follow symlinks on Windows (no lstat there), do not follow them elsewhere */
+static int vp_stat(const char *path, struct stat *st)
+{
+#ifdef _WIN32
+    return stat(path, st);
+#else
+    return lstat(path, st);
+#endif
+}
+
+#ifdef _WIN32
+static int vp_is_link(const char *full)
+{
+    return 0; /* Windows unpack never sees real symlinks in a ramdisk */
+}
+static int vp_compat_symlink(const char *target, const char *linkpath)
+{
+    FILE *f = fopen(linkpath, "wb");
+    if (!f)
+        return -1;
+    fprintf(f, "%s%s", VP_LINK_PREFIX, target);
+    fclose(f);
+    return 0;
+}
+static ssize_t vp_compat_readlink(const char *full, char *buf, size_t bufsz)
+{
+    /* a previous unpack on a POSIX host may have left a stub file behind */
+    FILE *f = fopen(full, "rb");
+    if (!f)
+        return -1;
+    char tmp[4096];
+    size_t n = fread(tmp, 1, sizeof(tmp) - 1, f);
+    fclose(f);
+    tmp[n] = 0;
+    if (strncmp(tmp, VP_LINK_PREFIX, strlen(VP_LINK_PREFIX)) != 0)
+        return -1;
+    const char *body = tmp + strlen(VP_LINK_PREFIX);
+    ssize_t len = (ssize_t)strlen(body);
+    if ((size_t)len >= bufsz)
+        len = (ssize_t)bufsz - 1;
+    memcpy(buf, body, (size_t)len);
+    buf[len] = 0;
+    return len;
+}
+#else
+static int vp_is_link(const char *full)
+{
+    struct stat st;
+    return lstat(full, &st) == 0 && S_ISLNK(st.st_mode);
+}
+static int vp_compat_symlink(const char *target, const char *linkpath)
+{
+    return symlink(target, linkpath);
+}
+static ssize_t vp_compat_readlink(const char *full, char *buf, size_t bufsz)
+{
+    return readlink(full, buf, bufsz);
+}
+#endif
+
 
 #define CPIO_MAGIC "070701"
 #define CPIO_MAGIC_CRC "070702"
@@ -388,7 +467,7 @@ int cpio_extract_dir(cpio_archive_t *a, const char *root)
                 mkdir_p(target);
             } else if (CPIO_IS_LINK(e)) {
                 unlink(target);
-                if (symlink((const char *)e->data.data, target) != 0)
+                if (vp_compat_symlink((const char *)e->data.data, target) != 0)
                     vp_warn("cannot create symlink %s", target);
             } else {
                 FILE *of = fopen(target, "wb");
@@ -421,7 +500,7 @@ static void add_file_entry(cpio_seg_t *seg, const char *rel, const char *full,
     if (is_link) {
         e.mode = 0120777;
         char target[PATH_MAX];
-        ssize_t n = readlink(full, target, sizeof(target) - 1);
+        ssize_t n = vp_compat_readlink(full, target, sizeof(target) - 1);
         if (n > 0) {
             target[n] = 0;
             buf_append(&e.data, target, (size_t)n);
@@ -448,7 +527,8 @@ static int collect_dir(const char *root, const char *base, cpio_seg_t *seg)
         char *full = path_join(base, de->d_name);
         struct stat st;
         int is_link = 0;
-        if (lstat(full, &st) != 0) {
+        is_link = vp_is_link(full);
+        if (vp_stat(full, &st) != 0) {
             free(full);
             continue;
         }

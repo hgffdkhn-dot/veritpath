@@ -24,11 +24,17 @@ library is present and skipped when it is not.
 | Target | How you get it |
 |---|---|
 | Linux x86_64 / aarch64 | `make static`, or the Release workflow |
-| Android arm64 / arm / x86_64 / x86 | `bash build.sh android` (needs NDK), or the Release workflow |
+| Android arm64 / arm / x86_64 / x86 | `bash build-android.sh`, or the Release workflow |
 | Windows x86_64 | `bash build.sh windows-x86_64` (mingw-w64), or the Release workflow |
 | macOS x86_64 / arm64 / universal | the Release workflow builds on a macOS runner |
 
-Pushing a tag builds every platform and attaches the binaries to the release:
+`build-android.sh` finds an NDK on its own, installs one with `sdkmanager` when
+there is none (that is all CI needs — no third-party setup action), and falls
+back to on-device clang when it is run inside Termux or an `adb shell`.
+
+Both workflows use only GitHub's own actions (`actions/checkout`,
+`upload/download-artifact`) plus the preinstalled `gh` CLI — nothing that can
+vanish from the marketplace. Pushing a tag builds every platform:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0

@@ -1,3 +1,13 @@
+/* veritpath - Android boot image analyzer and payload injector.
+ *
+ * _GNU_SOURCE is defined here rather than on the command line so the sources
+ * compile identically under -std=c11, -std=gnu11 and any cross toolchain:
+ * glibc otherwise hides PATH_MAX, strtok_r, symlink, readlink and lstat.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 /* Counter-measure plan printing. */
 #include "vp.h"
 

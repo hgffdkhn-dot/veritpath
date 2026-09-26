@@ -14,14 +14,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Static linux binaries
+
+      - name: Static Linux binaries
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
           mkdir -p dist
-          cc -O2 -std=c11 -Wall -Wextra -Isrc src/*.c -lz -static -o dist/veritpath-linux-x86_64
-          x86_64-linux-gnu-gcc -O2 -std=c11 -Isrc src/*.c -lz -static -o dist/veritpath-linux-x86_64
-          aarch64-linux-gnu-gcc -O2 -std=c11 -Isrc src/*.c -lz -static -o dist/veritpath-linux-aarch64
+          cc -O2 -std=c11 -Wall -Wextra -Isrc src/*.c -lz -static \
+             -o dist/veritpath-linux-x86_64
+          aarch64-linux-gnu-gcc -O2 -std=c11 -Isrc src/*.c -lz -static \
+             -o dist/veritpath-linux-aarch64
+
+      - name: Regression suite
+        run: |
+          make
+          bash tests/run.sh build/veritpath
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-linux
@@ -31,12 +39,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64
-      - name: Cross-compile for Windows
+
+      - name: Cross-compile with mingw-w64
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
           mkdir -p dist
           x86_64-w64-mingw32-gcc -O2 -std=c11 -Isrc src/*.c -lz -static \
-            -o dist/veritpath-windows-x86_64.exe
+             -o dist/veritpath-windows-x86_64.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-windows
@@ -46,28 +57,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: nttl/setup-ndk@v1
-        id: ndk
-        with:
-          ndk-version: r26d
-      - env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: bash build.sh android
+
+      # build-android.sh installs the NDK with the runner's own sdkmanager when
+      # ANDROID_NDK_HOME is unset - no third-party setup action involved.
+      - name: Build every Android ABI
+        run: bash build-android.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-android
           path: dist/veritpath-android-*
+          if-no-files-found: warn
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Universal macOS binary
         run: |
           mkdir -p dist
           cc -O2 -std=c11 -Isrc -arch x86_64 src/*.c -lz -o dist/veritpath-macos-x86_64
           cc -O2 -std=c11 -Isrc -arch arm64  src/*.c -lz -o dist/veritpath-macos-arm64
-          lipo -create -output dist/veritpath-macos-universal dist/veritpath-macos-x86_64 dist/veritpath-macos-arm64
+          lipo -create -output dist/veritpath-macos-universal \
+               dist/veritpath-macos-x86_64 dist/veritpath-macos-arm64
+          lipo -info dist/veritpath-macos-universal
+
+      - name: Regression suite
+        run: bash tests/run.sh build/veritpath || make && bash tests/run.sh build/veritpath
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-macos
@@ -82,13 +100,23 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
       - name: Package
         run: |
           mkdir -p out
           find artifacts -type f -exec cp {} out/ \;
           cd out && sha256sum * > SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
-          files: out/*
+          ls -l
+
+      # gh is preinstalled on GitHub runners, so this needs no third-party
+      # action at all - one less thing that can disappear.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --generate-notes
+          fi

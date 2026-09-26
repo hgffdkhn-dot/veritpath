@@ -11,53 +11,112 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build natively
         run: make
+
       - name: Regression suite
         run: bash tests/run.sh build/veritpath
-      - name: Build with clang and -Werror
+
+      - name: Strict build (clang, -Werror) and rerun
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq clang
           make clean
           make CC=clang CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror"
           bash tests/run.sh build/veritpath
-      - name: Cross-compile checks
+
+      - name: Static build
         run: |
+          make clean
+          make static
+          ./build/veritpath doctor
+
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchains
+        run: |
+          sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+
+      - name: Cross-compile (missing toolchains are skipped, not fatal)
+        run: |
           bash build.sh linux-aarch64
           bash build.sh windows-x86_64
+
+      - name: Regression suite against the native binary
+        run: |
+          make clean && make
+          bash tests/run.sh build/veritpath
 
   android:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: nttl/setup-ndk@v1
-        id: ndk
-        with:
-          ndk-version: r26d
+
+      # No third-party setup action: the NDK is installed with the sdkmanager
+      # that ships with the runner's Android SDK. build-android.sh does this
+      # itself when ANDROID_NDK_HOME is unset, so nothing else is needed here.
       - name: Build every Android ABI
         env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: bash build.sh android
+          ANDROID_HOME: ${{ env.ANDROID_HOME || '/usr/local/lib/android/sdk' }}
+        run: bash build-android.sh
+
+      - name: Show what was produced
+        run: |
+          ls -l dist/
+          file dist/veritpath-android-* || true
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-android
           path: dist/veritpath-android-*
+          if-no-files-found: warn
+
+
+  # The portability job exists because of a real failure: sources that rely on
+  # a -D_GNU_SOURCE flag in one script break under any other build path
+  # (PATH_MAX, strtok_r, symlink, readlink, lstat all vanish under -std=c11).
+  # The macros are now defined in the sources, and this proves it.
+  portability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile under several standards, warnings are errors
+        run: |
+          for std in c99 c11 c17 gnu99 gnu11 gnu17; do
+            echo "--- -std=$std"
+            cc -O2 -std=$std -Wall -Wextra -Werror -Isrc src/*.c -lz -o /tmp/vp-$std
+          done
+      - name: Without any feature-test macro on the command line
+        run: cc -O2 -std=c11 -Wall -Wextra -Werror -Isrc src/*.c -lz -o /tmp/vp-plain
+      - name: And with macros that duplicate the in-source ones
+        run: |
+          cc -O2 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc src/*.c -lz -o /tmp/vp-g
+          cc -O2 -std=c17 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Isrc src/*.c -lz -o /tmp/vp-p
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build and test
         run: |
           make
           bash tests/run.sh build/veritpath
+
       - name: Universal binary
         run: |
           mkdir -p dist
-          cc -O2 -std=c11 -Wall -Wextra -Isrc -arch x86_64 src/*.c -lz -o dist/veritpath-macos-x86_64
-          cc -O2 -std=c11 -Wall -Wextra -Isrc -arch arm64  src/*.c -lz -o dist/veritpath-macos-arm64
-          lipo -create -output dist/veritpath-macos-universal dist/veritpath-macos-x86_64 dist/veritpath-macos-arm64
+          cc -O2 -std=c11 -Wall -Wextra -Isrc -arch x86_64 src/*.c -lz \
+             -o dist/veritpath-macos-x86_64
+          cc -O2 -std=c11 -Wall -Wextra -Isrc -arch arm64  src/*.c -lz \
+             -o dist/veritpath-macos-arm64
+          lipo -create -output dist/veritpath-macos-universal \
+               dist/veritpath-macos-x86_64 dist/veritpath-macos-arm64
+          lipo -info dist/veritpath-macos-universal
+
       - uses: actions/upload-artifact@v4
         with:
           name: veritpath-macos

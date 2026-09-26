@@ -1,3 +1,13 @@
+/* veritpath - Android boot image analyzer and payload injector.
+ *
+ * _GNU_SOURCE is defined here rather than on the command line so the sources
+ * compile identically under -std=c11, -std=gnu11 and any cross toolchain:
+ * glibc otherwise hides PATH_MAX, strtok_r, symlink, readlink and lstat.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 /* veritpath command line interface. */
 #include "vp.h"
 uint32_t vp_detect_header_version(const uint8_t *d, size_t len, const char *path);
@@ -579,9 +589,10 @@ static int cmd_repack(args_t *a)
         free(orig);
         return 1;
     }
-    free(orig);
     boot_img_t img;
+    /* orig is stored as img.path, so it must outlive the parsed image */
     if (boot_img_parse(data.data, data.len, NULL, orig, &img) != 0) {
+        free(orig);
         buf_free(&data);
         return 1;
     }
@@ -615,12 +626,14 @@ static int cmd_repack(args_t *a)
         vp_err("cannot write %s", a->output);
         buf_free(&packed);
         boot_img_free(&img);
+        free(orig);
         buf_free(&data);
         return 1;
     }
     vp_log("wrote %s (%s)", a->output, human_size(packed.len));
     buf_free(&packed);
     boot_img_free(&img);
+    free(orig);
     buf_free(&data);
     return 0;
 }

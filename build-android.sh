@@ -6,6 +6,10 @@
 #   ./build-android.sh arm64           # only arm64-v8a
 #   ANDROID_NDK_HOME=/path/to/ndk ./build-android.sh
 #
+# If no NDK is present it tries to locate one, then to install one with
+# sdkmanager (so CI only needs the stock Android SDK), and finally falls back to
+# on-device clang when running inside Termux / adb shell.
+#
 # Output: dist/veritpath-android-<abi>
 set -euo pipefail
 
@@ -14,7 +18,8 @@ cd "$ROOT"
 OUT="$ROOT/dist"
 mkdir -p "$OUT"
 
-API=21
+API="${ANDROID_API:-21}"
+NDK_VERSION="${NDK_VERSION:-26.3.11579264}"
 SRCS=(src/main.c src/util.c src/compress.c src/cpio.c src/bootimg.c \
       src/detect.c src/json.c src/payload.c src/strategy.c)
 
@@ -25,52 +30,77 @@ case "$HOST_OS" in
     *) echo "unsupported host: $HOST_OS" >&2; exit 1 ;;
 esac
 
-# ---------------------------------------------------------------- find the NDK
-NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
-if [ -z "$NDK" ]; then
-    for cand in \
-        "${ANDROID_HOME:-}/ndk" \
-        "${ANDROID_SDK_ROOT:-}/ndk" \
-        "$HOME/Android/Sdk/ndk" \
-        "/opt/android-ndk" \
-        "/usr/local/android-ndk"; do
-        [ -d "$cand" ] || continue
-        latest=$(ls -1 "$cand" 2>/dev/null | sort -V | tail -1)
-        [ -n "$latest" ] && NDK="$cand/$latest"
-        [ -d "${NDK:-}" ] && break || NDK=""
-    done
-fi
-
-# running on Android (Termux / adb shell) -> use the system clang
-ON_DEVICE=0
-CC_BIN=""
-if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
-    if [ -d /data/data/com.termux/files/usr ] || [ -d /system/lib64 ]; then
-        if command -v clang >/dev/null 2>&1; then
-            CC_BIN=clang
-            ON_DEVICE=1
-            echo "==> no NDK found, building on-device with clang"
+# ------------------------------------------------------------- locate the NDK
+find_ndk() {
+    local ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+    [ -n "$ndk" ] && [ -x "$ndk/toolchains/llvm/prebuilt/$HOST_TAG/bin/clang" ] && {
+        echo "$ndk"
+        return 0
+    }
+    local root
+    for root in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" \
+                "$HOME/Android/Sdk" /usr/local/lib/android/sdk /opt/android-sdk; do
+        [ -d "$root/ndk" ] || continue
+        local v
+        v=$(ls -1 "$root/ndk" 2>/dev/null | sort -V | tail -1)
+        [ -n "$v" ] || continue
+        if [ -x "$root/ndk/$v/toolchains/llvm/prebuilt/$HOST_TAG/bin/clang" ]; then
+            echo "$root/ndk/$v"
+            return 0
         fi
-    fi
-    if [ "$ON_DEVICE" = 0 ]; then
+    done
+    # an NDK unpacked somewhere plain
+    for cand in /opt/android-ndk /usr/local/android-ndk; do
+        [ -x "$cand/toolchains/llvm/prebuilt/$HOST_TAG/bin/clang" ] && {
+            echo "$cand"
+            return 0
+        }
+    done
+    return 1
+}
+
+install_ndk() {
+    local sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+    [ -z "$sdk" ] && { [ -d /usr/local/lib/android/sdk ] && sdk=/usr/local/lib/android/sdk; }
+    [ -z "$sdk" ] && return 1
+    local sm
+    sm=$(ls -1 "$sdk"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+    [ -z "$sm" ] && sm=$(command -v sdkmanager 2>/dev/null || true)
+    [ -z "$sm" ] && return 1
+    echo "==> installing NDK $NDK_VERSION via sdkmanager"
+    yes 2>/dev/null | "$sm" --sdk_root="$sdk" --install "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
+    [ -x "$sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/$HOST_TAG/bin/clang" ] || return 1
+    echo "$sdk/ndk/$NDK_VERSION"
+}
+
+NDK=""
+if NDK=$(find_ndk); then
+    :
+elif NDK=$(install_ndk); then
+    :
+else
+    # running on Android (Termux / adb shell) -> the system clang is enough
+    if { [ -d /data/data/com.termux/files/usr ] || [ -d /system/lib64 ]; } \
+        && command -v clang >/dev/null 2>&1; then
+        echo "==> no NDK found, building on-device with clang"
+        ON_DEVICE=1
+        CC_BIN=clang
+    else
         echo "veritpath: Android NDK not found" >&2
-        echo "  install it:  sdkmanager --install 'ndk;26.3.11579264'" >&2
-        echo "  or point at it:  ANDROID_NDK_HOME=/path/to/ndk $0" >&2
+        echo "  install one:  sdkmanager --install 'ndk;$NDK_VERSION'" >&2
+        echo "  or point at:  ANDROID_NDK_HOME=/path/to/ndk $0" >&2
         exit 1
     fi
 fi
 
+ON_DEVICE="${ON_DEVICE:-0}"
 if [ "$ON_DEVICE" = 0 ]; then
     CC_BIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/clang"
-    if [ ! -x "$CC_BIN" ]; then
-        echo "veritpath: clang not found at $CC_BIN" >&2
-        exit 1
-    fi
+    [ -x "$CC_BIN" ] || { echo "veritpath: clang missing at $CC_BIN" >&2; exit 1; }
     echo "==> NDK: $NDK"
 fi
 
 # ------------------------------------------------------------------ ABI table
-declare -a TRIPLES ABIS
 TRIPLES=(aarch64-linux-android armv7a-linux-androideabi x86_64-linux-android i686-linux-android)
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
 
@@ -82,12 +112,12 @@ for i in "${!ABIS[@]}"; do
     if [ "$WANT" != "all" ] && [ "$WANT" != "$abi" ] && [ "$WANT" != "${abi%%-*}" ]; then
         continue
     fi
-    echo "==> building $abi ($triple$API)"
+    echo "==> building $abi"
     if [ "$ON_DEVICE" = 1 ]; then
-        "$CC_BIN" -O2 -std=c11 -Wall -static -Isrc -D_GNU_SOURCE \
+        "$CC_BIN" -O2 -std=c11 -Wall -Wextra -static -Isrc -D_GNU_SOURCE \
             "${SRCS[@]}" -lz -o "$OUT/veritpath-android-$abi"
     else
-        "$CC_BIN" --target="${triple}${API}" -O2 -std=c11 -Wall -static \
+        "$CC_BIN" --target="${triple}${API}" -O2 -std=c11 -Wall -Wextra -static \
             -Isrc -D_GNU_SOURCE "${SRCS[@]}" -lz \
             -o "$OUT/veritpath-android-$abi"
     fi

@@ -15,7 +15,9 @@ cd "$ROOT"
 OUT="$ROOT/dist"
 mkdir -p "$OUT"
 
-CC_BASE="-O2 -std=c11 -Wall -Wextra -Isrc"
+# -D_GNU_SOURCE matters: without it -std=c11 hides POSIX declarations
+# (strtok_r, symlink, readlink, lstat ...) and the build warn-spams
+CC_BASE="-O2 -std=c11 -Wall -Wextra -Isrc -D_GNU_SOURCE"
 SRCS=(src/*.c)
 LIBS="-lz"
 
@@ -31,20 +33,8 @@ build_one() {           # name, compiler, extra-flags, suffix
 }
 
 build_android() {
-    local ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
-    [ -d "$ndk" ] || { echo "  skip  android (set ANDROID_NDK_HOME)"; return 0; }
-    local tc="$ndk/toolchains/llvm/prebuilt"
-    tc="$tc/$(ls "$tc" | head -1)/bin"
-    local api=24
-    echo "  build android ($(basename "$ndk"))"
-    for spec in "arm64-v8a:aarch64-linux-android" "armeabi-v7a:armv7a-linux-androideabi" \
-                "x86_64:x86_64-linux-android" "x86:i686-linux-android"; do
-        local abi="${spec%%:*}" triple="${spec##*:}"
-        local cc="$tc/${triple}${api}-clang"
-        [ -x "$cc" ] || { echo "        skip $abi"; continue; }
-        $cc $CC_BASE --static "${SRCS[@]}" $LIBS -o "$OUT/veritpath-android-$abi"
-        echo "        $abi -> veritpath-android-$abi"
-    done
+    # the android script already knows how to find, install or fall back
+    bash "$ROOT/build-android.sh" "${1:-all}"
 }
 
 target="${1:-native}"
@@ -62,7 +52,7 @@ case "$target" in
     windows-i686)   build_one windows-i686.exe   i686-w64-mingw32-gcc   "-static" "" ;;
     macos-x86_64)  build_one macos-x86_64  x86_64-apple-darwin-clang "" ;;
     macos-arm64)   build_one macos-arm64   arm64-apple-darwin-clang  "" ;;
-    android)       build_android ;;
+    android)       build_android "$2" ;;
     all)
         build_one linux-x86_64   x86_64-linux-gnu-gcc "-static"
         build_one linux-aarch64  aarch64-linux-gnu-gcc "-static"

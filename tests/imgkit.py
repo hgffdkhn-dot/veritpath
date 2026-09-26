@@ -161,6 +161,8 @@ def basic_ramdisk():
             ("init", 0o100755, b"#!/system/bin/sh\n# first stage\n"),
             ("init.rc", 0o100644, b"on early-init\n    mkdir /system\n"),
             ("file_contexts", 0o100644, b"/su u:object_r:rootfs:s0\n"),
+            # mode 0120777 = symlink; the payload is the link target
+            ("bin", 0o120777, b"/system/bin"),
         ]
     )
 

@@ -1,3 +1,13 @@
+/* veritpath - Android boot image analyzer and payload injector.
+ *
+ * _GNU_SOURCE is defined here rather than on the command line so the sources
+ * compile identically under -std=c11, -std=gnu11 and any cross toolchain:
+ * glibc otherwise hides PATH_MAX, strtok_r, symlink, readlink and lstat.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 /* Architecture / layout detection. */
 #include "vp.h"
 
@@ -319,7 +329,8 @@ static void print_img(const char *path, const boot_img_t *img)
     putchar('\n');
 }
 
-static const char *yn(int v)
+/* not called yn(): that collides with the Bessel function builtin */
+static const char *yesno(int v)
 {
     return v ? "1" : "0";
 }
@@ -352,10 +363,10 @@ void detect_print(analysis_t *res, int as_json)
     else
         printf("ANDROID:%s\n", res->android_version);
     printf("LAYOUT:%s\n", res->layout);
-    printf("SYSTEM_AS_ROOT:%s\n", yn(res->system_as_root));
-    printf("GKI:%s\n", yn(res->gki));
+    printf("SYSTEM_AS_ROOT:%s\n", yesno(res->system_as_root));
+    printf("GKI:%s\n", yesno(res->gki));
     printf("SEGMENTS:%d\n", res->n_segments);
-    printf("PATCHED:%s\n", yn(res->already_patched));
+    printf("PATCHED:%s\n", yesno(res->already_patched));
     printf("TARGET:%s\n", res->target[0] ? res->target : "none");
     if (res->has_vendor_boot && strcmp(res->target, "vendor_boot") != 0)
         puts("OPTIONAL:vendor_boot");

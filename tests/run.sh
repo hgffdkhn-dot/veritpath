@@ -106,6 +106,8 @@ printf 'handmade\n' > "$WORK/work/ramdisk/handmade.txt"
 "$BIN" unpack "$WORK/repacked.img" -d "$WORK/work2" >/dev/null
 check "handmade file survives" "$([ "$(cat "$WORK/work2/ramdisk/handmade.txt")" = "handmade" ] && echo yes || echo no)" "yes"
 check "init survives"          "$([ -f "$WORK/work2/ramdisk/init" ] && echo yes || echo no)" "yes"
+check "symlink extracted"      "$([ -L "$WORK/work/ramdisk/bin" ] && echo yes || echo no)" "yes"
+check "symlink survives repack" "$([ -L "$WORK/work2/ramdisk/bin" ] && echo yes || echo no)" "yes"
 
 # ------------------------------------------------------- real-world quirks
 echo "== header quirks (vendor tools / odd dumps)"
