@@ -133,7 +133,9 @@ fastboot reboot
 
 镜像改过就没 OEM 签名了，vbmeta 校验必须关掉或自行重签。
 
-## 六、想手动改 ramdisk
+## 六、想手动改 ramdisk / 换组件
+
+完整拆解重组见 [UNPACK_REPACK.md](UNPACK_REPACK.md)。
 
 ```bash
 veritpath unpack init_boot.img -d work/

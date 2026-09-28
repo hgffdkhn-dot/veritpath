@@ -251,6 +251,7 @@ python3 tools/elf_fix.py /data/local/tmp/veritpath
 | [docs/DEVELOPERS.md](docs/DEVELOPERS.md) | 中文 | payload 格式、manifest 字段、布局规则、SELinux、退出码 |
 | [docs/QUICKSTART.en.md](docs/QUICKSTART.en.md) | English | 同上，英文版（给非中文开发者） |
 | [docs/DEVELOPERS.en.md](docs/DEVELOPERS.en.md) | English | 同上，英文版（给非中文开发者） |
+| [docs/UNPACK_REPACK.md](docs/UNPACK_REPACK.md) | 中文 | 拆解镜像为组件、改完再重组 |
 | [docs/ANDROID_APP.md](docs/ANDROID_APP.md) | 中文 | 集成到 APK：JNI 动态库 / 打包二进制 |
 | [docs/ANDROID_APP.en.md](docs/ANDROID_APP.en.md) | English | same as ANDROID_APP, in English |
 

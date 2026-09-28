@@ -11,6 +11,7 @@
 /* veritpath command line interface. */
 #include "vp.h"
 
+#include <stddef.h>
 #include <getopt.h>
 #include <stdlib.h>
 
@@ -25,8 +26,8 @@ static void usage(void)
     puts("  analyze   detect arch / layout and report the injection target");
     puts("  plan      print the injection plan (dry run)");
     puts("  inject    inject a payload and write a patched image");
-    puts("  unpack    unpack an image into a directory");
-    puts("  repack    rebuild an image from a directory");
+    puts("  unpack    split an image into components (-d DIR)");
+    puts("  repack    rebuild an image from a component directory");
     puts("  hexdump   dump the first 64 header bytes (diagnostics)");
     puts("  verify    check an injected image (exit 1 if incomplete)");
     puts("  payload-check  validate a payload directory");
@@ -61,6 +62,12 @@ static void usage(void)
     puts("  veritpath plan --init-boot init_boot.img -p payloads/example-su");
     puts("  veritpath inject --init-boot init_boot.img -p payloads/example-su -o out/");
     puts("  veritpath unpack init_boot.img -d work/ && veritpath repack work -o new.img");
+    puts("");
+    puts("unpack/repack (magiskboot style) - work/ holds one file per component:");
+    puts("  original.img  header.bin  image.json  kernel  second  dtb");
+    puts("  recovery_dtbo  boot_signature  bootconfig  ramdisk.cpio  ramdisk/");
+    puts("Edit or replace any of them, then repack. vendor_boot keeps one");
+    puts("ramdisk-<n>.cpio and ramdisk/segment<n>/ per fragment.");
 }
 
 static const struct option kLongOpts[] = {
@@ -786,6 +793,57 @@ static int cmd_inject(args_t *a)
     return 0;
 }
 
+/* --------------------------------------------------------- unpack / repack
+ *
+ * magiskboot-style: split an image into its components as plain files, let the
+ * user edit or replace any of them, then rebuild. The work directory is the
+ * interface - that is what makes a command chain possible:
+ *
+ *   veritpath unpack boot.img -d work/
+ *   edit work/ramdisk/...  or  cp newkernel work/kernel
+ *   veritpath repack work/ -o boot.new.img
+ *
+ * image.json records the header fields and what each file is, so the directory
+ * is self-describing rather than an opaque blob.
+ */
+
+/* offset into boot_img_t, since C has no member pointers */
+#define COMP_MEMBER(field) (offsetof(boot_img_t, field))
+
+typedef struct {
+    const char *file;
+    const char *label;
+    size_t offset;
+} comp_t;
+
+static const comp_t kComps[] = {
+    {"kernel",         "kernel",          COMP_MEMBER(kernel)},
+    {"second",         "second",          COMP_MEMBER(second)},
+    {"dtb",            "dtb",             COMP_MEMBER(dtb)},
+    {"recovery_dtbo",  "recovery_dtbo",   COMP_MEMBER(recovery_dtbo)},
+    {"boot_signature", "boot_signature",  COMP_MEMBER(boot_signature)},
+    {"bootconfig",     "bootconfig",      COMP_MEMBER(bootconfig)},
+};
+
+static buf_t *comp_buf(boot_img_t *img, size_t off)
+{
+    return (buf_t *)((uint8_t *)img + off);
+}
+
+static void json_str(buf_t *j, const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '"' || *s == '\\')
+            buf_appendf(j, "\\%c", *s);
+        else if (*s == '\n')
+            buf_append_str(j, "\\n");
+        else if ((unsigned char)*s < 0x20)
+            buf_appendf(j, "\\u%04x", (unsigned char)*s);
+        else
+            buf_append(j, s, 1);
+    }
+}
+
 static int cmd_unpack(args_t *a)
 {
     if (!a->dir) {
@@ -805,32 +863,65 @@ static int cmd_unpack(args_t *a)
         return 1;
     }
     boot_img_t img;
+    boot_img_init(&img);
     if (boot_img_parse(data.data, data.len, NULL, img_path, &img) != 0) {
         boot_img_free(&img);
         buf_free(&data);
         return 1;
     }
     mkdir_p(a->dir);
-    /* keep the original so repack can restore header/kernel/cmdline */
+
+    /* the original is the repack base: it restores every header field even the
+     * ones we do not model */
     char *orig = path_join(a->dir, "original.img");
     write_file(orig, data.data, data.len);
-    free(orig);
 
-    if (img.kernel.len) {
-        char *p = path_join(a->dir, "kernel");
-        write_file(p, img.kernel.data, img.kernel.len);
+    char *hdr = path_join(a->dir, "header.bin");
+    write_file(hdr, img.raw_header.data, img.raw_header.len);
+
+    printf("[%s]\n", img_path);
+    printf("  %-14s %s\n", "header", human_size(img.raw_header.len));
+
+    buf_t j;
+    buf_init(&j);
+    buf_append_str(&j, "{\n  \"source\": \"");
+    json_str(&j, img_path);
+    buf_appendf(&j, "\",\n  \"source_size\": %zu,\n", data.len);
+    buf_appendf(&j, "  \"trailing\": %zu,\n", img.trailing);
+    buf_append_str(&j, "  \"image\": {\n");
+    buf_appendf(&j, "    \"role\": %s,\n", img.is_vendor ? "\"vendor_boot\"" : "\"boot\"");
+    buf_appendf(&j, "    \"header_version\": %u,\n", img.header_version);
+    buf_appendf(&j, "    \"page_size\": %u,\n", img.page_size);
+    buf_appendf(&j, "    \"os_version\": %u,\n", img.os_version);
+    buf_appendf(&j, "    \"header_span\": %zu,\n", img.header_span);
+    buf_append_str(&j, "    \"name\": \"");
+    json_str(&j, img.name);
+    buf_append_str(&j, "\",\n    \"cmdline\": \"");
+    json_str(&j, img.cmdline[0] ? img.cmdline : img.cmdline_main);
+    buf_append_str(&j, "\"\n  },\n");
+    buf_append_str(&j, "  \"components\": [\n");
+
+    int wrote_any = 0;
+    for (size_t i = 0; i < sizeof(kComps) / sizeof(kComps[0]); i++) {
+        buf_t *b = comp_buf(&img, kComps[i].offset);
+        if (!b->len)
+            continue;
+        char *p = path_join(a->dir, kComps[i].file);
+        if (write_file(p, b->data, b->len) == 0) {
+            printf("  %-14s %s\n", kComps[i].label, human_size(b->len));
+            if (wrote_any)
+                buf_append_str(&j, ",\n");
+            buf_appendf(&j, "    {\"file\": \"%s\", \"label\": \"%s\", "
+                            "\"size\": %zu, \"format\": \"%s\"}",
+                        kComps[i].file, kComps[i].label, b->len,
+                        comp_name(comp_detect(b->data, b->len)));
+            wrote_any = 1;
+        }
         free(p);
     }
-    if (img.dtb.len) {
-        char *p = path_join(a->dir, "dtb");
-        write_file(p, img.dtb.data, img.dtb.len);
-        free(p);
-    }
-    if (img.bootconfig.len) {
-        char *p = path_join(a->dir, "bootconfig");
-        write_file(p, img.bootconfig.data, img.bootconfig.len);
-        free(p);
-    }
+    buf_append_str(&j, wrote_any ? "\n" : "");
+
+    /* ramdisk: decompressed cpio per segment, plus an extracted tree */
     if (img.ramdisk.len) {
         cpio_archive_t arc;
         cpio_init(&arc);
@@ -838,25 +929,73 @@ static int cmd_unpack(args_t *a)
             char *rd = path_join(a->dir, "ramdisk");
             mkdir_p(rd);
             cpio_extract_dir(&arc, rd);
-            char *cp = path_join(a->dir, "ramdisk.cpio");
-            buf_t raw;
-            buf_init(&raw);
-            cpio_serialize(&arc, &raw);
-            write_file(cp, raw.data, raw.len);
-            buf_free(&raw);
-            free(cp);
             free(rd);
-            vp_log("unpacked %s into %s (%zu entries)", img_path, a->dir,
+            printf("  %-14s %s (%zu segment%s, %zu entries)\n", "ramdisk",
+                   human_size(img.ramdisk.len), arc.n, arc.n == 1 ? "" : "s",
                    arc.segs[0].n);
+
+            for (size_t i = 0; i < arc.n; i++) {
+                char name[32];
+                snprintf(name, sizeof(name), i ? "ramdisk-%zu.cpio" : "ramdisk.cpio", i);
+                char *cp = path_join(a->dir, name);
+                buf_t raw;
+                buf_init(&raw);
+                cpio_serialize_seg(&arc.segs[i], &raw);
+                write_file(cp, raw.data, raw.len);
+                buf_free(&raw);
+                free(cp);
+            }
+            if (wrote_any)
+                buf_append_str(&j, ",\n");
+            buf_appendf(&j, "    {\"file\": \"ramdisk.cpio\", \"label\": "
+                            "\"ramdisk\", \"size\": %zu, \"segments\": %zu, "
+                            "\"format\": \"%s\"}",
+                        img.ramdisk.len, arc.n,
+                        comp_name(comp_detect(img.ramdisk.data, img.ramdisk.len)));
             cpio_free(&arc);
         }
     }
-    printf("  kernel    %s\n", human_size(img.kernel.len));
-    printf("  ramdisk   %s\n", human_size(img.ramdisk.len));
-    printf("  dtb       %s\n", human_size(img.dtb.len));
+    buf_append_str(&j, "\n  ]\n}\n");
+
+    char *jp = path_join(a->dir, "image.json");
+    write_file(jp, j.data, j.len);
+    buf_free(&j);
+    free(jp);
+
+    if (img.trailing)
+        vp_log("%s of padding after the image is preserved in original.img "
+               "(whole-partition dump)", human_size(img.trailing));
+
+    printf("\n  edit files in %s then: veritpath repack %s -o new.img\n",
+           a->dir, a->dir);
+    free(orig);
+    free(hdr);
     boot_img_free(&img);
     buf_free(&data);
     return 0;
+}
+
+static int comp_maybe_replace(const char *dir, const char *file,
+                              const char *label, buf_t *dst)
+{
+    char *p = path_join(dir, file);
+    if (!file_exists(p)) {
+        free(p);
+        return 0;
+    }
+    buf_t b;
+    buf_init(&b);
+    int rc = read_file(p, &b);
+    free(p);
+    if (rc != 0) {
+        buf_free(&b);
+        return 0;
+    }
+    buf_reset(dst);
+    buf_append(dst, b.data, b.len);
+    vp_log("%s taken from %s (%s)", label, file, human_size(b.len));
+    buf_free(&b);
+    return 1;
 }
 
 static int cmd_repack(args_t *a)
@@ -867,48 +1006,93 @@ static int cmd_repack(args_t *a)
         return 1;
     }
     a->dir = dir;
-    char *orig = path_join(a->dir, "original.img");
+    char *orig = path_join(dir, "original.img");
     buf_t data;
     buf_init(&data);
     if (read_file(orig, &data) != 0) {
-        vp_err("%s missing - only directories created by 'veritpath unpack' can be "
-               "repacked",
-               orig);
-        free(orig);
-        return 1;
-    }
-    boot_img_t img;
-    /* orig is stored as img.path, so it must outlive the parsed image */
-    if (boot_img_parse(data.data, data.len, NULL, orig, &img) != 0) {
+        vp_err("%s missing - only directories from 'veritpath unpack' can be "
+               "repacked", orig);
         free(orig);
         buf_free(&data);
         return 1;
     }
-    char *rd = path_join(a->dir, "ramdisk");
+    boot_img_t img;
+    boot_img_init(&img);
+    /* orig becomes img.path, so it has to outlive the parsed image */
+    if (boot_img_parse(data.data, data.len, NULL, orig, &img) != 0) {
+        boot_img_free(&img);
+        free(orig);
+        buf_free(&data);
+        return 1;
+    }
+
+    printf("[%s]\n", dir);
+
+    /* ramdisk: an extracted tree wins over the .cpio files */
+    char *rd = path_join(dir, "ramdisk");
     if (is_dir(rd)) {
         cpio_archive_t arc;
         cpio_init(&arc);
-        cpio_build_dir(rd, &arc);
-        boot_img_set_ramdisk(&img, &arc, -1);
-        vp_log("rebuilt ramdisk from %s", rd);
+        if (cpio_build_dir(rd, &arc) == 0) {
+            boot_img_set_ramdisk(&img, &arc, a->opts.ramdisk_format);
+            vp_log("ramdisk rebuilt from %s (%zu segment%s)", rd, arc.n,
+                   arc.n == 1 ? "" : "s");
+        } else {
+            vp_warn("cannot rebuild ramdisk from %s", rd);
+        }
         cpio_free(&arc);
+    } else {
+        /* no tree: rebuild from the .cpio files. Each segment ends with a
+         * TRAILER!!! record, so concatenating them and parsing once restores
+         * the multi-segment layout (this is what boot_img_ramdisk_archive
+         * does when reading). */
+        buf_t joined;
+        buf_init(&joined);
+        size_t nfiles = 0;
+        for (size_t i = 0; i < 64; i++) {
+            char name[32];
+            snprintf(name, sizeof(name), i ? "ramdisk-%zu.cpio" : "ramdisk.cpio", i);
+            char *cp = path_join(dir, name);
+            if (!file_exists(cp)) {
+                free(cp);
+                break;
+            }
+            buf_t b;
+            buf_init(&b);
+            if (read_file(cp, &b) == 0) {
+                buf_append(&joined, b.data, b.len);
+                nfiles++;
+            }
+            buf_free(&b);
+            free(cp);
+        }
+        if (nfiles) {
+            cpio_archive_t arc;
+            cpio_init(&arc);
+            if (cpio_parse(joined.data, joined.len, &arc) == 0 && arc.n) {
+                boot_img_set_ramdisk(&img, &arc, a->opts.ramdisk_format);
+                vp_log("ramdisk rebuilt from %zu cpio file%s (%zu segment%s)",
+                       nfiles, nfiles == 1 ? "" : "s", arc.n,
+                       arc.n == 1 ? "" : "s");
+            } else {
+                vp_warn("cannot parse the ramdisk cpio files - keeping the "
+                        "original ramdisk");
+            }
+            cpio_free(&arc);
+        }
+        buf_free(&joined);
     }
     free(rd);
-    char *kp = path_join(a->dir, "kernel");
-    if (file_exists(kp) && !img.is_vendor) {
-        buf_t k;
-        buf_init(&k);
-        if (read_file(kp, &k) == 0) {
-            buf_reset(&img.kernel);
-            buf_append(&img.kernel, k.data, k.len);
-        }
-        buf_free(&k);
-    }
-    free(kp);
+
+    for (size_t i = 0; i < sizeof(kComps) / sizeof(kComps[0]); i++)
+        comp_maybe_replace(dir, kComps[i].file, kComps[i].label,
+                           comp_buf(&img, kComps[i].offset));
 
     buf_t packed;
     buf_init(&packed);
-    boot_img_pack(&img, &packed);
+    /* keep trailing bytes: original.img is the whole input, so a repack of an
+     * untouched directory should be byte-size stable */
+    boot_img_pack_ex(&img, &packed, 1);
     mkdir_p_for(a->output);
     if (write_file(a->output, packed.data, packed.len) != 0) {
         vp_err("cannot write %s", a->output);
@@ -918,7 +1102,7 @@ static int cmd_repack(args_t *a)
         buf_free(&data);
         return 1;
     }
-    vp_log("wrote %s (%s)", a->output, human_size(packed.len));
+    printf("  -> %s (%s)\n", a->output, human_size(packed.len));
     buf_free(&packed);
     boot_img_free(&img);
     free(orig);

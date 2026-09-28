@@ -344,6 +344,61 @@ check "kept version still verifies" \
 check "normal image has no trailing" \
     "$("$BIN" analyze --brief --boot "$WORK/img/boot.img" | grep -c '^TRAILING')" "0"
 
+# ------------------------------------------------- unpack / repack (component level)
+echo "== unpack into components, repack"
+"$BIN" unpack "$WORK/img/init_boot.img" -d "$WORK/u1" >"$WORK/u1.log" 2>&1
+check "unpack reports the header"  "$(grep -c 'header' "$WORK/u1.log")" "1"
+check "unpack reports the ramdisk" "$(grep -c 'ramdisk' "$WORK/u1.log")" "1"
+for f in original.img header.bin image.json ramdisk.cpio; do
+    check "unpack wrote $f" \
+        "$(test -f "$WORK/u1/$f" && echo 1 || echo 0)" "1"
+done
+check "ramdisk tree extracted" "$(test -d "$WORK/u1/ramdisk" && echo 1 || echo 0)" "1"
+check "image.json lists components" \
+    "$(grep -c '"components"' "$WORK/u1/image.json")" "1"
+
+if "$BIN" repack "$WORK/u1" -o "$WORK/u1.img" >"$WORK/u1r.log" 2>&1; then
+    ok "repack a component directory"
+else
+    bad "repack a component directory"
+    sed 's/^/        /' "$WORK/u1r.log" | head -5
+fi
+check "round trip keeps the header" \
+    "$("$BIN" analyze --brief "$WORK/u1.img" | grep -c '^HEADER_VER:4$')" "1"
+check "round trip keeps the ramdisk" \
+    "$("$BIN" analyze --brief "$WORK/u1.img" | grep -c '^SEGMENTS:1$')" "1"
+
+# editing the tree must survive a repack
+echo "hand-made" > "$WORK/u1/ramdisk/hello.txt"
+"$BIN" repack "$WORK/u1" -o "$WORK/u2.img" >/dev/null 2>&1
+"$BIN" unpack "$WORK/u2.img" -d "$WORK/u2" >/dev/null 2>&1
+check "an added file survives" \
+    "$(test -f "$WORK/u2/ramdisk/hello.txt" && echo 1 || echo 0)" "1"
+
+# replacing a component (kernel) must take effect
+"$BIN" unpack "$WORK/img/boot.img" -d "$WORK/u3" >/dev/null 2>&1
+printf 'NEWKERNEL' > "$WORK/u3/kernel"
+"$BIN" repack "$WORK/u3" -o "$WORK/u3.img" >/dev/null 2>&1
+check "a replaced kernel is used" \
+    "$("$BIN" analyze --brief "$WORK/u3.img" | grep -c '^KERNEL_SZ:9$')" "1"
+
+# vendor_boot keeps its fragments through unpack/repack
+"$BIN" unpack "$WORK/img/vendor_boot.img" -d "$WORK/uv" >/dev/null 2>&1
+check "vendor segments extracted" \
+    "$(test -d "$WORK/uv/ramdisk/segment1" && echo 1 || echo 0)" "1"
+check "per-segment cpio written" \
+    "$(test -f "$WORK/uv/ramdisk-1.cpio" && echo 1 || echo 0)" "1"
+if "$BIN" repack "$WORK/uv" -o "$WORK/uv.img" >/dev/null 2>&1; then
+    ok "repack a vendor_boot directory"
+else
+    bad "repack a vendor_boot directory"
+fi
+if python3 "$KIT" verify-frags "$WORK/uv.img" >/dev/null 2>&1; then
+    ok "vendor fragments survive unpack/repack"
+else
+    bad "vendor fragments survive unpack/repack"
+fi
+
 # ------------------------------------------------------------------ errors
 echo "== error handling"
 head -c 8192 /dev/zero > "$WORK/junk.img"

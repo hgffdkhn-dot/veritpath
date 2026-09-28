@@ -897,7 +897,16 @@ int boot_img_set_ramdisk(boot_img_t *img, cpio_archive_t *a, int force)
         for (size_t i = 0; i < a->n; i++) {
             buf_t c;
             buf_init(&c);
-            comp_fmt_t fmt = force >= 0 ? (comp_fmt_t)force : img->chunk_fmts[i];
+            comp_fmt_t fmt;
+            if (force >= 0)
+                fmt = (comp_fmt_t)force;
+            else if (img->chunk_fmts && i < img->n_chunks)
+                fmt = img->chunk_fmts[i];
+            else
+                /* no per-chunk info (e.g. a ramdisk rebuilt from a directory
+                 * rather than read back from the image): fall back to what the
+                 * original ramdisk actually used */
+                fmt = comp_detect(img->ramdisk.data, img->ramdisk.len);
             if (fmt == FMT_RAW)
                 fmt = FMT_GZIP;
             comp_compress(segs[i].data, segs[i].len, fmt, &c);
@@ -920,9 +929,13 @@ int boot_img_set_ramdisk(boot_img_t *img, cpio_archive_t *a, int force)
         buf_init(&joined);
         for (size_t i = 0; i < a->n; i++)
             buf_append(&joined, segs[i].data, segs[i].len);
-        comp_fmt_t fmt =
-            force >= 0 ? (comp_fmt_t)force
-                      : (img->n_chunks ? img->chunk_fmts[0] : FMT_GZIP);
+        comp_fmt_t fmt;
+        if (force >= 0)
+            fmt = (comp_fmt_t)force;
+        else if (img->chunk_fmts && img->n_chunks)
+            fmt = img->chunk_fmts[0];
+        else
+            fmt = comp_detect(img->ramdisk.data, img->ramdisk.len);
         if (fmt == FMT_RAW)
             fmt = FMT_GZIP;
         comp_compress(joined.data, joined.len, fmt, &out);

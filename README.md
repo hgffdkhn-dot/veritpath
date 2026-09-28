@@ -263,6 +263,7 @@ contents and a close match, so it is obvious where the mismatch is.
 | [docs/DEVELOPERS.en.md](docs/DEVELOPERS.en.md) | English | payload format, manifest fields, layout rules, SELinux, exit codes |
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Chinese | same as QUICKSTART.en, in Chinese |
 | [docs/DEVELOPERS.md](docs/DEVELOPERS.md) | Chinese | same as DEVELOPERS.en, in Chinese |
+| [docs/UNPACK_REPACK.en.md](docs/UNPACK_REPACK.en.md) | English | splitting an image into components and rebuilding it |
 | [docs/ANDROID_APP.en.md](docs/ANDROID_APP.en.md) | English | embedding in an APK: JNI library or bundled binary |
 | [docs/ANDROID_APP.md](docs/ANDROID_APP.md) | Chinese | same as ANDROID_APP.en, in Chinese |
 

@@ -137,7 +137,10 @@ fastboot reboot
 A modified image is no longer OEM-signed, so vbmeta verification must be
 disabled or the image re-signed.
 
-## 7. Editing the ramdisk by hand
+## 7. Editing the ramdisk by hand / swapping components
+
+See [UNPACK_REPACK.en.md](UNPACK_REPACK.en.md) for the full split-and-rebuild
+workflow.
 
 ```bash
 veritpath unpack init_boot.img -d work/
