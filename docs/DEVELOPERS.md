@@ -169,8 +169,9 @@ fastboot flash init_boot out/init_boot.veritpath.img
 
 ## 八、当前已知限制
 
-- 重建 `vendor_boot.img` 时会把多个 ramdisk fragment 合并成一个。payload 仍会
-  进入 vendor ramdisk，但 fragment 分隔不保留。
+- 重建 `vendor_boot.img` 时会按 fragment 表切分 ramdisk，每个 fragment 独立
+  重新压缩，表里的 size / offset 按原图约定重写，**fragment 分隔完整保留**。
+  每个 vendor ramdisk fragment 都会收到 payload（包括 recovery fragment）。
 - `arch` 检测依赖 kernel（判断 `ARM64` 魔数）。`init_boot.img` 不带 kernel，
   单独给它时判不出架构，需要同时传 `boot.img`。
 
@@ -211,3 +212,77 @@ fi
 
 另外，改过 `PATH` 或删过旧文件之后记得 `hash -r`——bash 会缓存命令的解析结果，
 否则会报 `No such file or directory` 指向一个已经不存在的路径。
+
+## 十、没有 ramdisk 的 system-as-root 设备
+
+部分设备（纯 SAR）的 `boot.img` **根本不含 ramdisk**：内核直接把 `/system` 挂成
+`/`，然后执行 `/system/bin/init`。这类设备没东西可打补丁，必须先**造一个 ramdisk**。
+
+### 识别
+
+```bash
+veritpath analyze --boot boot.img
+```
+
+```
+ramdisk_layout       no_ramdisk
+needs_ramdisk        True
+injection target     boot
+```
+
+`--brief` 下会多一行 `NEEDS_RAMDISK:1`。
+
+注意区分两种「boot.img 没有 ramdisk」：
+
+- **GKI 设备**——ramdisk 在 `init_boot.img` 或 `vendor_boot.img` 里，把它们一起传
+  进来即可，不需要造
+- **纯 SAR**——哪儿都没有 ramdisk，必须造
+
+veritpath 只在后者上报 `no_ramdisk`。不确定就多传几个镜像进去看判定。
+
+### 造 ramdisk
+
+```bash
+veritpath inject --boot boot.img -p my-su --create-ramdisk -o out/
+```
+
+不加 `--create-ramdisk` 会直接报错退出（退出码 1），不会静默什么都不做。
+
+造出来的 ramdisk 包含：
+
+- 标准挂载点目录 `/dev /proc /sys /system /data /mnt /apex /debug_ramdisk …`
+- `/init.rc`（已 `import /init.veritpath.rc`）
+- `/file_contexts`（空壳，init 缺了它会起不来）
+- `/veritpath-skeleton.txt`（说明文件）
+- 你的 payload 文件
+
+### ⚠ 必须自己提供 init
+
+**造出来的 `/init` 是个占位脚本，刷进去开不了机。** 原因很实在：第一阶段 init 执行时
+`/system` 还没挂上，`/system/bin/sh` 根本不存在，脚本跑不起来。
+
+真正的 `/init` 必须是**静态二进制**。你的 manifest 里这样声明，veritpath 会用它替掉
+占位文件：
+
+```json
+{
+  "files": [
+    {"src": "init", "dest": "/init", "mode": "0755", "required": true}
+  ]
+}
+```
+
+这个 init 要负责：
+
+1. 做 payload 需要的初始化
+2. 挂载 `/system`（SAR 设备上内核不会帮你挂）
+3. `exec` 原来的 init——通常在 `/system/bin/init`
+
+如果 payload 没提供 `/init`，注入会照常完成，但会打印醒目告警：
+
+```
+! the created ramdisk still has the placeholder /init
+  it will NOT boot - put a real static first-stage init in the payload
+```
+
+`verify` 也会一并检查。

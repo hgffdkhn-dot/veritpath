@@ -141,6 +141,13 @@ void cpio_entry_free(cpio_entry_t *e);
 size_t cpio_main_segment(cpio_archive_t *a);
 int cpio_extract_dir(cpio_archive_t *a, const char *root);
 int cpio_build_dir(const char *root, cpio_archive_t *a);
+int cpio_create_skeleton(cpio_archive_t *a);
+int cpio_has_placeholder_init(cpio_archive_t *a);
+
+/* Android boot image magic: "ANDROID!" for boot/init_boot/recovery,
+ * "VNDRBOOT" for vendor_boot. */
+#define BOOT_MAGIC "ANDROID!"
+#define VENDOR_MAGIC "VNDRBOOT"
 
 /* -------------------------------------------------------------- boot img */
 
@@ -155,7 +162,13 @@ typedef struct {
 } vendor_fragment_t;
 
 typedef struct {
-    int is_vendor;                  /* vendor_boot.img */
+    int is_vendor;
+    /* Bytes after the last payload the header describes. A whole-partition
+     * `dd` (dd if=/dev/block/by-name/boot_a) is mostly zeros past the real
+     * image, and repacking drops them - which looks alarming ("192MB became
+     * 42MB") if nobody says so. */
+    size_t trailing;
+    buf_t trailing_data;            /* kept only when non-empty */                  /* vendor_boot.img */
     char role[16];                  /* boot / init_boot / vendor_boot ... */
     const char *path;               /* source file (not owned) */
     uint32_t header_version;
@@ -178,16 +191,21 @@ typedef struct {
     size_t n_chunks;
 } boot_img_t;
 
+/* header-version detection, also useful for diagnostics */
+uint32_t vp_detect_header_version(const uint8_t *d, size_t len, const char *path);
+
 void boot_img_init(boot_img_t *img);
 void boot_img_free(boot_img_t *img);
 int boot_img_parse(const uint8_t *data, size_t len, const char *role,
                    const char *path, boot_img_t *img);
 int boot_img_pack(boot_img_t *img, buf_t *out);
+int boot_img_pack_ex(boot_img_t *img, buf_t *out, int keep_trailing);
 const char *boot_img_cmdline(boot_img_t *img);
 int boot_img_append_cmdline(boot_img_t *img, const char *extra);
 int boot_img_ramdisk_archive(boot_img_t *img, cpio_archive_t *a);
 int boot_img_set_ramdisk(boot_img_t *img, cpio_archive_t *a, int force);
 int boot_img_has_ramdisk(boot_img_t *img);
+size_t boot_img_trailing(const boot_img_t *img);
 buf_t *boot_img_dtb(boot_img_t *img);   /* may be NULL */
 
 /* ------------------------------------------------------------- detection */
@@ -204,6 +222,11 @@ typedef struct {
     int n_segments;
     int has_vendor_boot;
     int recovery_fragment;
+    int needs_ramdisk;                /* no ramdisk anywhere: one must be created */
+    /* bytes of padding after the image (whole-partition dumps) */
+    size_t trailing[VP_MAX_IMAGES];
+    const char *trailing_role[VP_MAX_IMAGES];
+    int n_trailing;
     char slot[8];
     const boot_img_t *target_img;
     const boot_img_t *boot;
@@ -317,6 +340,8 @@ typedef struct {
     int no_backup;
     int segment;                    /* -1 = auto */
     int ramdisk_format;             /* -1 = keep, else comp_fmt_t */
+    int create_ramdisk;              /* build a ramdisk when none exists */
+    int keep_trailing;               /* carry trailing bytes over to the output */
     const char *cmdline;
     const char *output;
 } options_t;

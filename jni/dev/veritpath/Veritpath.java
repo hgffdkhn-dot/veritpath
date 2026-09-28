@@ -47,6 +47,34 @@ public final class Veritpath {
         }
     }
 
+    /**
+     * An input image and the flag that names it. Use the factories so the flag
+     * can never be wrong or missing:
+     *
+     * <pre>{@code
+     * Veritpath.inject(Veritpath.Image.initBoot(path), payloadDir, outDir);
+     * }</pre>
+     */
+    public static final class Image {
+        /** null means "no flag" - the CLI works the role out from the content. */
+        final String flag;
+        final String path;
+
+        private Image(String flag, String path) {
+            if (path == null) throw new IllegalArgumentException("path is required");
+            this.flag = flag;
+            this.path = path;
+        }
+
+        public static Image boot(String path)       { return new Image("--boot", path); }
+        public static Image initBoot(String path)   { return new Image("--init-boot", path); }
+        public static Image vendorBoot(String path) { return new Image("--vendor-boot", path); }
+        public static Image recovery(String path)   { return new Image("--recovery", path); }
+
+        /** Let the CLI detect whether this is a boot, init_boot or vendor_boot. */
+        public static Image auto(String path)       { return new Image(null, path); }
+    }
+
     private static boolean loaded;
 
     private Veritpath() {}
@@ -68,33 +96,63 @@ public final class Veritpath {
         return new Result(code, nativeLastOutput());
     }
 
-    /** Analyse images; returns the {@code --brief} KEY:VALUE report. */
-    public static Result analyze(String... args) {
+    /**
+     * Analyse images. Pass one or more {@link Image}s; the correct flags are
+     * emitted for you.
+     */
+    public static Result analyze(Image... images) {
+        if (images == null || images.length == 0)
+            throw new IllegalArgumentException("at least one image is required");
+        String[] head = {"analyze", "--brief"};
+        return run(concat(withFlags(images), head, null));
+    }
+
+    /** Analyse and get structured JSON instead of the text report. */
+    public static String analyzeJson(Image... images) {
+        if (images == null || images.length == 0)
+            throw new IllegalArgumentException("at least one image is required");
+        String[] head = {"analyze", "--json"};
+        return run(concat(withFlags(images), head, null)).output;
+    }
+
+    /**
+     * Analyse with full control over the flags, e.g.
+     * {@code analyzeRaw("--boot", bootPath, "--init-boot", initBootPath, "-v")}.
+     */
+    public static Result analyzeRaw(String... args) {
         String[] full = new String[args.length + 1];
         full[0] = "analyze";
         System.arraycopy(args, 0, full, 1, args.length);
         return run(full);
     }
 
-    /** Analyse and get structured JSON instead of the text report. */
-    public static String analyzeJson(String... args) {
-        String[] full = new String[args.length + 2];
-        full[0] = "analyze";
-        full[1] = "--json";
-        System.arraycopy(args, 0, full, 2, args.length);
-        return run(full).output;
+    /**
+     * Inject a payload into an image.
+     *
+     * <p>The image is supplied as an {@link Image}, so the correct flag is
+     * always emitted. The old signature took raw strings for the image, which
+     * made it easy to pass a bare path that the CLI then ignored because it
+     * only looks at {@code --boot} / {@code --init-boot} / {@code --vendor-boot}
+     * / {@code --recovery}.
+     */
+    public static Result inject(Image image, String payloadDir, String outputPath,
+                               String... extraArgs) {
+        if (image == null) throw new IllegalArgumentException("image is required");
+        if (payloadDir == null) throw new IllegalArgumentException("payloadDir is required");
+        if (outputPath == null) throw new IllegalArgumentException("outputPath is required");
+        String[] head = {"inject", "-p", payloadDir, "-o", outputPath};
+        return run(concat(withFlags(image), head, extraArgs));
     }
 
-    /** Inject a payload. Returns exit code 0 on success. */
-    public static Result inject(String payloadDir, String outputPath, String... images) {
-        String[] full = new String[images.length + 5];
-        full[0] = "inject";
-        System.arraycopy(images, 0, full, 1, images.length);
-        full[images.length + 1] = "-p";
-        full[images.length + 2] = payloadDir;
-        full[images.length + 3] = "-o";
-        full[images.length + 4] = outputPath;
-        return run(full);
+    /** Inject into several images at once (e.g. boot + init_boot). */
+    public static Result inject(Image[] images, String payloadDir, String outputPath,
+                               String... extraArgs) {
+        if (images == null || images.length == 0)
+            throw new IllegalArgumentException("at least one image is required");
+        if (payloadDir == null) throw new IllegalArgumentException("payloadDir is required");
+        if (outputPath == null) throw new IllegalArgumentException("outputPath is required");
+        String[] head = {"inject", "-p", payloadDir, "-o", outputPath};
+        return run(concat(withFlags(images), head, extraArgs));
     }
 
     /**
@@ -124,6 +182,29 @@ public final class Veritpath {
     /** Release the buffer holding the last command's output. */
     public static void release() {
         if (loaded) nativeFree();
+    }
+
+    /** Turns one or more Images into their CLI flag tokens. */
+    private static String[] withFlags(Image... images) {
+        int n = 0;
+        for (Image i : images) n += (i.flag == null ? 1 : 2);
+        String[] out = new String[n];
+        int at = 0;
+        for (Image i : images) {
+            if (i.flag != null) out[at++] = i.flag;
+            out[at++] = i.path;
+        }
+        return out;
+    }
+
+    private static String[] concat(String[] first, String[] second, String[] third) {
+        int n = first.length + second.length + (third == null ? 0 : third.length);
+        String[] out = new String[n];
+        System.arraycopy(first, 0, out, 0, first.length);
+        System.arraycopy(second, 0, out, first.length, second.length);
+        if (third != null)
+            System.arraycopy(third, 0, out, first.length + second.length, third.length);
+        return out;
     }
 
     private static native int nativeRun(String[] argv);

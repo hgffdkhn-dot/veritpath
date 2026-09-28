@@ -78,6 +78,18 @@ else
     bad "patched vendor_boot"
 fi
 
+# the fragment table must survive: this used to collapse into one blob
+if python3 "$KIT" verify-frags "$WORK/out2/vendor_boot.veritpath.img"; then
+    ok "vendor fragments preserved (count, offsets, extents)"
+else
+    bad "vendor fragments preserved (count, offsets, extents)"
+fi
+if python3 "$KIT" verify-frags "$WORK/img/vendor_boot.img" >/dev/null 2>&1; then
+    ok "fixture itself carries a fragment table"
+else
+    bad "fixture itself carries a fragment table"
+fi
+
 # ------------------------------------------------------- legacy images
 echo "== legacy headers"
 for hv in 1 2; do
@@ -191,6 +203,16 @@ if cc -O2 -std=c11 -DVP_NO_MAIN -Isrc -c src/util.c -o "$WORK/util.o" 2>/dev/nul
 else
     bad "sources compile without main() (library build)"
 fi
+# no JDK in every environment, so check the wrapper structurally: every
+# native must have a JNI symbol, and required args must be validated
+if python3 tools/check_java.py jni/dev/veritpath/Veritpath.java \
+        jni/veritpath_jni.c >"$WORK/java.log" 2>&1; then
+    ok "Java wrapper matches the JNI layer"
+else
+    bad "Java wrapper matches the JNI layer"
+    sed 's/^/        /' "$WORK/java.log" | head -8
+fi
+
 if [ -f tools/make_stub_jni.py ] && command -v python3 >/dev/null 2>&1; then
     if bash tools/test_jni.sh "$BIN" >"$WORK/jni.log" 2>&1; then
         ok "JNI binding runs the CLI and returns output"
@@ -199,6 +221,128 @@ if [ -f tools/make_stub_jni.py ] && command -v python3 >/dev/null 2>&1; then
         sed 's/^/        /' "$WORK/jni.log" | head -10
     fi
 fi
+
+# ------------------------------------------------- bare image path (no flag)
+echo "== bare positional image"
+out=$("$BIN" analyze --brief "$WORK/img/init_boot.img")
+check "bare path is used"          "$(grep -c '^HEADER_VER:' <<<"$out")" "1"
+check "bare path gets a role"      "$(grep -c '^TARGET:init_boot$' <<<"$out")" "1"
+
+if "$BIN" inject "$WORK/img/init_boot.img" -p "$PAY" -o "$WORK/bare" \
+        >"$WORK/bare.log" 2>&1; then
+    ok "inject accepts a bare path"
+else
+    bad "inject accepts a bare path"
+    sed 's/^/        /' "$WORK/bare.log" | head -5
+fi
+check "bare inject produced an image" \
+    "$("$BIN" verify "$WORK/bare/init_boot.veritpath.img" | grep -c '^VERDICT:OK$')" "1"
+
+# ------------------------------------------------- no-ramdisk (system-as-root)
+echo "== boot.img with no ramdisk"
+out=$("$BIN" analyze --brief --boot "$WORK/img/boot.img")
+check "layout is no_ramdisk"     "$(grep -c '^LAYOUT:no_ramdisk$' <<<"$out")" "1"
+check "needs_ramdisk reported"   "$(grep -c '^NEEDS_RAMDISK:1$' <<<"$out")" "1"
+check "target is still boot"     "$(grep -c '^TARGET:boot$' <<<"$out")" "1"
+
+# refusing must be a failure, not a silent 0
+if "$BIN" inject --boot "$WORK/img/boot.img" -p "$PAY" -o "$WORK/sar_no" \
+        >"$WORK/sar_no.log" 2>&1; then
+    bad "inject refuses without --create-ramdisk"
+else
+    ok "inject refuses without --create-ramdisk"
+fi
+# the message mentions --create-ramdisk at least once
+if [ "$(grep -c 'create-ramdisk' "$WORK/sar_no.log")" -ge 1 ]; then
+    ok "the refusal says why"
+else
+    bad "the refusal says why"
+fi
+
+if "$BIN" inject --boot "$WORK/img/boot.img" -p "$PAY" --create-ramdisk \
+        -o "$WORK/sar" >"$WORK/sar.log" 2>&1; then
+    ok "inject creates a ramdisk"
+else
+    bad "inject creates a ramdisk"
+    sed 's/^/        /' "$WORK/sar.log" | head -6
+fi
+check "created ramdisk is reported" \
+    "$(grep -c 'no ramdisk - creating one' "$WORK/sar.log")" "1"
+check "placeholder init is flagged" \
+    "$(grep -c 'placeholder /init' "$WORK/sar.log")" "1"
+
+out=$("$BIN" analyze --brief "$WORK/sar/boot.veritpath.img")
+check "patched image now has a ramdisk" "$(grep -c '^RAMDISK_SZ:' <<<"$out")" "1"
+check "patched image targets boot"     "$(grep -c '^TARGET:boot$' <<<"$out")" "1"
+check "patched image is marked"        "$(grep -c '^PATCHED:1$' <<<"$out")" "1"
+
+"$BIN" unpack "$WORK/sar/boot.veritpath.img" -d "$WORK/sarw" >/dev/null 2>&1
+for d in dev proc sys system data mnt; do
+    check "skeleton has /$d" "$(test -d "$WORK/sarw/ramdisk/$d" && echo 1 || echo 0)" "1"
+done
+check "skeleton has init.rc" \
+    "$(test -f "$WORK/sarw/ramdisk/init.rc" && echo 1 || echo 0)" "1"
+check "skeleton has file_contexts" \
+    "$(test -f "$WORK/sarw/ramdisk/file_contexts" && echo 1 || echo 0)" "1"
+
+# a payload that supplies its own init must replace the placeholder
+mkdir -p "$WORK/pinit"
+printf '#!/system/bin/sh\nexec "$@"\n' > "$WORK/pinit/init"
+cat > "$WORK/pinit/manifest.json" <<'JSON'
+{"name":"with-init","arch":["arm64"],
+ "files":[{"src":"init","dest":"/init","mode":"0755","required":true}],
+ "rc":{"file":"/init.veritpath.rc","import_into":["/init.rc"],
+       "content":"on post-fs-data\n    chmod 0755 /su\n"}}
+JSON
+if "$BIN" inject --boot "$WORK/img/boot.img" -p "$WORK/pinit" --create-ramdisk \
+        -o "$WORK/sar2" >"$WORK/sar2.log" 2>&1; then
+    ok "inject with a payload-supplied init"
+else
+    bad "inject with a payload-supplied init"
+    sed 's/^/        /' "$WORK/sar2.log" | head -6
+fi
+check "no placeholder warning now" \
+    "$(grep -c 'placeholder /init' "$WORK/sar2.log")" "0"
+check "its own init is in place" \
+    "$("$BIN" verify "$WORK/sar2/boot.veritpath.img" -p "$WORK/pinit" | grep -c '^VERDICT:OK$')" "1"
+
+# ------------------------------------------- whole-partition dumps (dd)
+echo "== partition dump: trailing padding"
+python3 "$KIT" partition "$WORK/part" >/dev/null
+PART=$WORK/part/partition_dump.img
+
+out=$("$BIN" analyze --brief --boot "$PART")
+check "trailing is reported"     "$(grep -c '^TRAILING.boot:' <<<"$out")" "1"
+check "image still parses"       "$(grep -c '^HEADER_VER:4$' <<<"$out")" "1"
+"$BIN" analyze --boot "$PART" | grep -q 'not part of the boot image'
+check "the report explains it"   "$?" "0"
+
+# default: padding dropped, output equals the real image
+"$BIN" inject --boot "$PART" -p "$PAY" -o "$WORK/pd1" >"$WORK/pd1.log" 2>&1
+check "dropped padding is logged" \
+    "$(grep -c 'padding after the image was dropped' "$WORK/pd1.log")" "1"
+REAL=$(stat -c %s "$WORK/part/real.img")
+OUT1=$(stat -c %s "$WORK/pd1/partition_dump.veritpath.img")
+# same content, maybe a few bytes different after recompression
+if [ $(( REAL > OUT1 ? REAL - OUT1 : OUT1 - REAL )) -lt $(( 4 << 20 )) ]; then
+    ok "output matches the real image size ($REAL vs $OUT1)"
+else
+    bad "output matches the real image size ($REAL vs $OUT1)"
+fi
+check "padded image still verifies" \
+    "$("$BIN" verify "$WORK/pd1/partition_dump.veritpath.img" | grep -c '^VERDICT:OK$')" "1"
+
+# --keep-trailing carries it over
+"$BIN" inject --boot "$PART" -p "$PAY" --keep-trailing -o "$WORK/pd2" >/dev/null 2>&1
+OUT2=$(stat -c %s "$WORK/pd2/partition_dump.veritpath.img")
+PART_SZ=$(stat -c %s "$PART")
+check "trailing kept: same size"  "$([ "$OUT2" = "$PART_SZ" ] && echo 1 || echo 0)" "1"
+check "kept version still verifies" \
+    "$("$BIN" verify "$WORK/pd2/partition_dump.veritpath.img" | grep -c '^VERDICT:OK$')" "1"
+
+# a normal image must not claim trailing bytes
+check "normal image has no trailing" \
+    "$("$BIN" analyze --brief --boot "$WORK/img/boot.img" | grep -c '^TRAILING')" "0"
 
 # ------------------------------------------------------------------ errors
 echo "== error handling"

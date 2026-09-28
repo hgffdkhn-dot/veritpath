@@ -178,9 +178,10 @@ image was already patched and warns on a second injection (override with
 
 ## 8. Current known limitations
 
-- Rebuilding a `vendor_boot.img` merges its ramdisk fragments into one. The
-  payload still lands in the vendor ramdisk, but fragment separation is not
-  preserved.
+- Rebuilding a `vendor_boot.img` splits the ramdisk using the fragment table
+  and recompresses each fragment on its own, rewriting sizes and offsets with
+  the original layout convention, so **fragment separation is preserved**. Every
+  vendor ramdisk fragment receives the payload, recovery ones included.
 - `arch` detection depends on the kernel (it looks for the `ARM64` magic).
   `init_boot.img` carries no kernel, so arch cannot be determined from it alone
   — pass `boot.img` as well.
@@ -223,3 +224,82 @@ fi
 Also run `hash -r` after changing `PATH` or deleting an old copy — bash caches
 resolved command locations and will otherwise report `No such file or directory`
 for a path that no longer exists.
+
+## 10. system-as-root devices with no ramdisk
+
+Some devices (pure SAR) carry **no ramdisk at all** in `boot.img`: the kernel
+mounts `/system` as `/` and runs `/system/bin/init` from there. There is nothing
+to patch, so a ramdisk has to be **created** first.
+
+### Recognising it
+
+```bash
+veritpath analyze --boot boot.img
+```
+
+```
+ramdisk_layout       no_ramdisk
+needs_ramdisk        True
+injection target     boot
+```
+
+With `--brief` you also get `NEEDS_RAMDISK:1`.
+
+Two different things look like "boot.img has no ramdisk":
+
+- **A GKI device** — the ramdisk lives in `init_boot.img` or `vendor_boot.img`.
+  Pass those along; nothing needs creating.
+- **A pure SAR device** — no ramdisk anywhere, so one must be created.
+
+veritpath reports `no_ramdisk` only for the second case. If unsure, pass the
+other images too and see what it concludes.
+
+### Creating one
+
+```bash
+veritpath inject --boot boot.img -p my-su --create-ramdisk -o out/
+```
+
+Without `--create-ramdisk` the command fails outright (exit 1) rather than
+quietly doing nothing.
+
+The created ramdisk contains:
+
+- standard mount points `/dev /proc /sys /system /data /mnt /apex
+  /debug_ramdisk …`
+- `/init.rc` (already importing `/init.veritpath.rc`)
+- `/file_contexts` (an empty stub — init will not start without one)
+- `/veritpath-skeleton.txt` (notes)
+- your payload files
+
+### ⚠ You must supply your own init
+
+**The generated `/init` is a placeholder script and will not boot.** The reason
+is practical: at first-stage init `/system` is not mounted yet, so
+`/system/bin/sh` does not exist and the script cannot run.
+
+A real `/init` has to be a **static binary**. Declare it in your manifest and
+veritpath swaps it in for the placeholder:
+
+```json
+{
+  "files": [
+    {"src": "init", "dest": "/init", "mode": "0755", "required": true}
+  ]
+}
+```
+
+That init is responsible for:
+
+1. whatever your payload needs
+2. mounting `/system` (on a SAR device the kernel will not do it for you)
+3. `exec`ing the original init — normally `/system/bin/init`
+
+If the payload supplies no `/init`, injection still completes but prints:
+
+```
+! the created ramdisk still has the placeholder /init
+  it will NOT boot - put a real static first-stage init in the payload
+```
+
+`verify` checks for this too.

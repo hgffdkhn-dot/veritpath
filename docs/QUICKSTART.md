@@ -155,6 +155,8 @@ veritpath repack work/ -o init_boot.new.img
 | `--format NAME` | 强制 ramdisk 压缩（gzip / lz4_legacy / …） |
 | `--patch-vendor-boot` | 连 vendor ramdisk（recovery/fastbootd）一起注入 |
 | `--force` | 忽略告警、允许重复注入 |
+| `--create-ramdisk` | 镜像没有 ramdisk 时造一个（SAR 设备） |
+| `--keep-trailing` | 保留镜像后面的尾部字节（分区 dump） |
 | `--dry-run` | 内存里跑一遍，不落盘 |
 | `--brief` | analyze 输出紧凑 KEY:VALUE |
 | `--json` | 机器可读输出 |
@@ -169,3 +171,37 @@ veritpath hexdump boot.img     # 解析不了就先看这个
 
 它会打印文件大小、前 64 字节 hex + ASCII、magic，以及 `@8/@12/@20/@24/@36/@40`
 的实际值，外加工具自己的判定结果。把这段贴出来即可定位。
+### 输出比输入小很多？先看这个
+
+**这不是数据丢失。** 用 `dd if=/dev/block/by-name/boot_a of=boot.img` 提取的是**整个
+分区**，而真实的 boot.img 通常比分区小，后面全是 0 填充。重打包只输出镜像本身，
+填充就被丢掉了。
+
+veritpath 会自己说清楚：
+
+```
+ramdisk_layout       boot
+...
+  · boot: the file holds 72.0MiB that is not part of the boot image - a whole-partition
+    dump (dd of /dev/block/by-name/...). That padding is dropped when repacking, so the
+    output is smaller than the input. This is correct, not data loss.
+```
+
+`--brief` 下多一行 `TRAILING.boot:75448320`，`--json` 里有 `trailing` 字段。
+
+举例：192MB 的分区 dump，真实镜像可能只有 42MB，注入后输出 42MB 完全正常。
+
+**想按真实大小提取**，用 header 里记录的大小算出长度：
+
+```bash
+# 读出 kernel/ramdisk 大小再截断（或用 veritpath hexdump 看大小）
+veritpath hexdump boot.img
+```
+
+**想原样保留尾部**（少数厂商会在镜像后附加数据）：
+
+```bash
+veritpath inject --boot boot.img -p my-su --keep-trailing -o out/
+```
+
+保留的字节会原封不动追加到输出末尾，镜像本身不受影响，`verify` 照常通过。

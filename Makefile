@@ -107,3 +107,15 @@ jni-test:
 	bash tools/test_jni.sh
 
 .PHONY: lib lib-shared lib-jni jni-test
+
+# Truncation fuzzer. Pedestrian but it is what caught the out-of-bounds reads
+# at the fixed header offsets.
+fuzz:
+	python3 tools/fuzz_truncate.py build/veritpath
+
+# Same, but against an ASan+UBSan build - catches memory errors, not just crashes
+fuzz-asan:
+	cc -O1 -g -std=c11 -fsanitize=address,undefined -Isrc src/*.c -lz -o build/veritpath-asan
+	python3 tools/fuzz_truncate.py build/veritpath-asan
+
+.PHONY: fuzz fuzz-asan

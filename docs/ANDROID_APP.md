@@ -66,8 +66,9 @@ bash build-android.sh --jni
 ### 3. Java 里调用
 
 ```java
-Veritpath.Result r = Veritpath.run(
-        "analyze", "--brief", "--boot", bootFile.getAbsolutePath());
+Veritpath.Result r = Veritpath.analyze(
+        Veritpath.Image.initBoot(initBootPath),
+        Veritpath.Image.boot(bootPath));
 
 if (r.ok()) {
     String arch   = r.line("ARCH");     // "arm64"
@@ -75,18 +76,26 @@ if (r.ok()) {
 }
 
 // 或者一步拿到 JSON
-String json = Veritpath.analyzeJson("--boot", bootPath);
+String json = Veritpath.analyzeJson(Veritpath.Image.boot(bootPath));
 ```
 
 注入：
 
 ```java
 Veritpath.Result r = Veritpath.inject(
-        payloadDir,                 // -p
-        outputDir,                  // -o
-        "--init-boot", initBootPath // 镜像参数
-);
+        Veritpath.Image.initBoot(initBootPath),
+        payloadDir,
+        outputDir);
 ```
+
+镜像用 `Image.boot()` / `initBoot()` / `vendorBoot()` / `recovery()` / `auto()`
+构造，**flag 不会写错也不会漏**。需要完全控制参数时用 `analyzeRaw(...)` 或
+`run(...)`。
+
+> 早期版本 `inject(payloadDir, outputPath, images...)` 把镜像当裸位置参数传入，
+> 而 CLI 只认 `--boot` / `--init-boot` / `--vendor-boot` / `--recovery`，裸参数被
+> getopt 忽略，结果一个镜像都没加载。现在 CLI 也支持裸路径（会自动判定角色），
+> 但 Java 侧已改成类型化的 `Image`，不会再出现这种问题。
 
 刷之前自检：
 
@@ -161,3 +170,26 @@ bash tools/test_jni.sh
 
 它会生成一份最小的 `jni.h` 存根，编出绑定，再用一个能干活的 JNIEnv 跑
 `analyze --brief`，确认输出里真有 `ARCH:`。CI 里也有这一步。
+
+## 排错
+
+### `no input images given`
+
+镜像没被加载。常见原因：
+
+1. **镜像当裸位置参数传了**——旧版 CLI 只认 `--boot` / `--init-boot` /
+   `--vendor-boot` / `--recovery`。现在裸路径也能用（自动判定角色），但最好还是
+   显式带 flag。
+2. **路径不存在或没权限**——报错会打印解析出的路径、当前目录和建议。
+3. **文件不是 boot 镜像**——用 `hexdump` 看前 8 字节是不是 `ANDROID!` 或
+   `VNDRBOOT`。
+
+```java
+// 确认命令到底拼成了什么
+Log.d("vp", String.join(" ", args));
+```
+
+### 两个镜像都传了，但 `TARGET` 是 none
+
+说明两个都没解析出 ramdisk。`analyze` 会在报告里逐块列出每个镜像的
+`header_version` 和 `ramdisk_size`，看哪一块是空的。

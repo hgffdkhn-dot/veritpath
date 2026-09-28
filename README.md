@@ -226,6 +226,29 @@ by hand:
 python3 tools/elf_fix.py /data/local/tmp/veritpath
 ```
 
+### No ramdisk at all (system-as-root)
+
+A pure SAR `boot.img` carries no ramdisk — the kernel mounts `/system` as `/`
+and runs `/system/bin/init`. `analyze` reports this as `LAYOUT:no_ramdisk` with
+`NEEDS_RAMDISK:1`. Create one and patch it in a single step:
+
+```bash
+veritpath inject --boot boot.img -p my-su --create-ramdisk -o out/
+```
+
+Without the flag the command fails instead of writing an untouched image. The
+generated `/init` is a placeholder: supply a real static first-stage init in the
+payload (`{"src": "init", "dest": "/init"}`), or the image will not boot. See
+[docs/DEVELOPERS.en.md](docs/DEVELOPERS.en.md) section 10.
+
+### The output is much smaller than the input
+
+Nothing was lost. `dd` of a whole partition (`/dev/block/by-name/boot_a`)
+includes zero padding past the real image, and repacking emits only the image.
+A 192MB partition dump whose real image is 42MB correctly yields a 42MB output.
+`analyze` reports this as a `TRAILING.<role>:<bytes>` line/`trailing` JSON field
+plus a plain-language note. Pass `--keep-trailing` to carry the padding over.
+
 ### `no such file`
 
 The error lists the path it resolved, the working directory, the directory
@@ -270,6 +293,8 @@ bash tests/run.sh          # 68 checks, self-contained (cc + python3 only)
 nothing but the standard library; the Python implementation that used to sit
 next to this project is gone.
 
-Known limitation: rebuilding a `vendor_boot.img` merges its ramdisk fragments
-into one. The payload still lands in the vendor ramdisk, but per-fragment
-separation is not preserved yet.
+`vendor_boot.img` handling: the ramdisk is split using the fragment table
+rather than by sniffing compression, so every fragment is rebuilt separately and
+the table is rewritten with correct sizes and offsets (page-aligned or
+back-to-back, whichever the original used). Every vendor ramdisk fragment
+receives the payload.

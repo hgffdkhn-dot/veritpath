@@ -10,7 +10,6 @@
 
 /* veritpath command line interface. */
 #include "vp.h"
-uint32_t vp_detect_header_version(const uint8_t *d, size_t len, const char *path);
 
 #include <getopt.h>
 #include <stdlib.h>
@@ -51,6 +50,8 @@ static void usage(void)
     puts("      --force          ignore compatibility checks and double injection");
     puts("      --no-backup      do not keep a backup of the original image");
     puts("      --dry-run        patch in memory only, write nothing");
+    puts("      --create-ramdisk build a ramdisk when the image has none (SAR)");
+    puts("      --keep-trailing  carry any bytes after the image into the output");
     puts("      --json           machine readable output");
     puts("  -b, --brief          compact KEY:VALUE output (magiskboot style)");
     puts("      --header-version N  force a header version (0-4, diagnostics)");
@@ -79,6 +80,8 @@ static const struct option kLongOpts[] = {
     {"no-backup", no_argument, 0, 'n'},
     {"dry-run", no_argument, 0, 'D'},
     {"json", no_argument, 0, 'j'},
+    {"create-ramdisk", no_argument, 0, 'C'},
+    {"keep-trailing", no_argument, 0, 'K'},
     {"verbose", no_argument, 0, 'v'},
     {"brief", no_argument, 0, 'b'},
     {"help", no_argument, 0, 'h'},
@@ -101,7 +104,7 @@ static void parse_args(int argc, char **argv, args_t *a)
     options_init(&a->opts);
     optind = 1;
     for (;;) {
-        int c = getopt_long(argc, argv, "p:o:d:B:I:V:R:c:g:F:fDnPjSvhH:b", kLongOpts, NULL);
+        int c = getopt_long(argc, argv, "p:o:d:B:I:V:R:c:g:F:fDnPjSvhH:bCK", kLongOpts, NULL);
         if (c == -1)
             break;
         switch (c) {
@@ -120,6 +123,8 @@ static void parse_args(int argc, char **argv, args_t *a)
         case 'f': a->opts.force = 1; break;
         case 'n': a->opts.no_backup = 1; break;
         case 'D': a->opts.dry_run = 1; break;
+        case 'C': a->opts.create_ramdisk = 1; break;
+        case 'K': a->opts.keep_trailing = 1; break;
         case 'j': a->json = 1; break;
         case 'b': a->brief = 1; break;
         case 'v': vp_set_verbose(1); break;
@@ -136,8 +141,29 @@ static boot_img_t *g_imgs[VP_MAX_IMAGES];
 static const char *g_roles[VP_MAX_IMAGES];
 static size_t g_n;
 
+/* Role of an image passed as a bare positional argument. Without this the path
+ * would be silently dropped: load_images() only looks at --boot/--init-boot/
+ * --vendor-boot/--recovery, and getopt leaves the positional in a->positional.
+ * Callers (notably the JNI wrapper) saw "no input images given" for no visible
+ * reason. */
+static const char *guess_role(const uint8_t *d, size_t len)
+{
+    if (len >= 8 && memcmp(d, VENDOR_MAGIC, 8) == 0)
+        return "vendor_boot";
+    if (len > 8 && memcmp(d, BOOT_MAGIC, 8) == 0)
+        return "boot";
+    /* magic may sit after a board header; fall back to a plain boot role */
+    return "boot";
+}
+
 static int load_images(args_t *a, image_set_t *set)
 {
+    const char *positional_role = NULL;
+    if (!a->boot && !a->init_boot && !a->vendor_boot && !a->recovery &&
+        a->positional) {
+        positional_role = guess_role((const uint8_t *)"?", 0); /* set below */
+    }
+
     struct {
         const char *role;
         const char *path;
@@ -148,6 +174,32 @@ static int load_images(args_t *a, image_set_t *set)
         {"recovery", a->recovery},
     };
     g_n = 0;
+
+    /* a bare path: read it first so the role can be decided from its content */
+    buf_t pos_data;
+    int have_pos = 0;
+    buf_init(&pos_data);
+    if (positional_role) {
+        if (read_file(a->positional, &pos_data) != 0) {
+            vp_report_missing("image", a->positional);
+            buf_free(&pos_data);
+            return -1;
+        }
+        positional_role = guess_role(pos_data.data, pos_data.len);
+        if (positional_role && strcmp(positional_role, "boot") == 0 &&
+            pos_data.len > 0) {
+            boot_img_t probe;
+            boot_img_init(&probe);
+            if (boot_img_parse(pos_data.data, pos_data.len, "boot",
+                               a->positional, &probe) == 0) {
+                /* no kernel but a ramdisk: this is an init_boot.img */
+                if (!probe.kernel.len && probe.ramdisk.len)
+                    positional_role = "init_boot";
+            }
+            boot_img_free(&probe);
+        }
+        have_pos = 1;
+    }
     for (size_t i = 0; i < 4; i++) {
         if (!spec[i].path)
             continue;
@@ -173,8 +225,33 @@ static int load_images(args_t *a, image_set_t *set)
         set[g_n].role = spec[i].role;
         g_n++;
     }
+    if (have_pos) {
+        boot_img_t *img = xmalloc(sizeof(boot_img_t));
+        if (boot_img_parse(pos_data.data, pos_data.len, positional_role,
+                           a->positional, img) != 0) {
+            boot_img_free(img);
+            free(img);
+            buf_free(&pos_data);
+            return -1;
+        }
+        img->path = a->positional;
+        g_imgs[g_n] = img;
+        g_roles[g_n] = positional_role;
+        set[g_n].img = img;
+        set[g_n].role = positional_role;
+        g_n++;
+        if (vp_verbose)
+            vp_log("no --flag given, treating '%s' as %s",
+                   a->positional, positional_role);
+    }
+    buf_free(&pos_data);
+
     if (g_n == 0) {
-        vp_err("no input images given (use --boot/--init-boot/--vendor-boot)");
+        vp_err("no input images given");
+        if (a->positional)
+            vp_err("  '%s' was not usable as an image", a->positional);
+        vp_err("  use --boot / --init-boot / --vendor-boot / --recovery, "
+               "or just pass the path");
         return -1;
     }
     return 0;
@@ -218,8 +295,10 @@ static void backup_original(const char *src)
         buf_free(&data);
         return;
     }
-    char *bak = xmalloc(strlen(src) + 32);
-    sprintf(bak, "%s.veritpath.bak", src);
+    const char *suffix = ".veritpath.bak";
+    size_t n = strlen(src) + strlen(suffix) + 1;
+    char *bak = xmalloc(n);
+    snprintf(bak, n, "%s%s", src, suffix);
     if (write_file(bak, data.data, data.len) == 0)
         vp_log("backup of %s -> %s", src, bak);
     free(bak);
@@ -254,8 +333,9 @@ static char *out_path_for(const char *src, const char *output, const char *role,
     }
     if (multiple) {
         char *stem = replace_suffix(output, "");
-        char *res = xmalloc(strlen(stem) + strlen(role) + 16);
-        sprintf(res, "%s.%s.img", stem, role);
+        size_t n = strlen(stem) + strlen(role) + 8;
+        char *res = xmalloc(n);
+        snprintf(res, n, "%s.%s.img", stem, role);
         free(stem);
         return res;
     }
@@ -578,10 +658,16 @@ static int cmd_inject(args_t *a)
     putchar('\n');
 
     if (!res.target[0]) {
-        vp_err("no ramdisk found in any supplied image - nothing to inject");
-        payload_free(&p);
-        free_images();
-        return 1;
+        if (!a->opts.create_ramdisk) {
+            vp_err("no ramdisk found in any supplied image - nothing to inject");
+            vp_err("  this looks like a system-as-root device (no ramdisk in "
+                   "boot.img)");
+            vp_err("  add --create-ramdisk to build one, or pass "
+                   "--init-boot / --vendor-boot if it is really a GKI device");
+            payload_free(&p);
+            free_images();
+            return 1;
+        }
     }
     if (res.already_patched && !a->opts.force) {
         vp_err("image already carries a veritpath payload; use --force to re-inject");
@@ -598,6 +684,8 @@ static int cmd_inject(args_t *a)
         img_by_role("vendor_boot"))
         targets[ntargets++] = "vendor_boot";
 
+    int created_ramdisk = 0;
+    size_t patched = 0;
     for (size_t t = 0; t < ntargets; t++) {
         boot_img_t *img = img_by_role(targets[t]);
         if (!img)
@@ -605,9 +693,15 @@ static int cmd_inject(args_t *a)
         cpio_archive_t arc;
         cpio_init(&arc);
         if (boot_img_ramdisk_archive(img, &arc) != 0) {
-            vp_err("%s: cannot read ramdisk", targets[t]);
-            cpio_free(&arc);
-            continue;
+            if (a->opts.create_ramdisk) {
+                vp_log("%s: no ramdisk - creating one", targets[t]);
+                cpio_create_skeleton(&arc);
+                created_ramdisk = 1;
+            } else {
+                vp_err("%s: cannot read ramdisk", targets[t]);
+                cpio_free(&arc);
+                continue;
+            }
         }
         size_t seg = a->opts.segment >= 0 ? (size_t)a->opts.segment : cpio_main_segment(&arc);
         if (seg >= arc.n)
@@ -624,6 +718,18 @@ static int cmd_inject(args_t *a)
         }
         boot_img_set_ramdisk(img, &arc, a->opts.ramdisk_format);
 
+        if (created_ramdisk) {
+            if (cpio_has_placeholder_init(&arc)) {
+                vp_err("! the created ramdisk still has the placeholder /init");
+                vp_err("  it will NOT boot - put a real static first-stage init "
+                       "in the payload");
+                vp_err("  (manifest: {\"src\": \"init\", \"dest\": \"/init\", "
+                       "\"mode\": \"0755\"})");
+            } else {
+                vp_log("ramdisk created with a payload-supplied /init");
+            }
+        }
+
         if (t == 0) {
             if (a->opts.permissive)
                 boot_img_append_cmdline(img, "androidboot.selinux=permissive");
@@ -636,12 +742,18 @@ static int cmd_inject(args_t *a)
         if (a->opts.dry_run) {
             vp_log("[%s] dry run - nothing written", targets[t]);
             cpio_free(&arc);
+            patched++;
             continue;
         }
+        patched++;
 
         buf_t packed;
         buf_init(&packed);
-        boot_img_pack(img, &packed);
+        boot_img_pack_ex(img, &packed, a->opts.keep_trailing);
+        if (img->trailing && !a->opts.keep_trailing && img->path)
+            vp_log("%s: %s of padding after the image was dropped "
+                   "(whole-partition dump); use --keep-trailing to carry it over",
+                   img->path, human_size(img->trailing));
         char *out = out_path_for(img->path, a->output, targets[t], ntargets > 1);
         if (!a->opts.no_backup)
             backup_original(img->path);
@@ -663,6 +775,13 @@ static int cmd_inject(args_t *a)
         cpio_free(&arc);
     }
     payload_free(&p);
+    if (patched == 0) {
+        /* e.g. "cannot read ramdisk" for every target: exiting 0 here would let
+         * a script flash an image that was never touched */
+        vp_err("nothing was patched - no output written");
+        free_images();
+        return 1;
+    }
     free_images();
     return 0;
 }

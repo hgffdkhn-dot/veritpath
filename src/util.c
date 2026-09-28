@@ -235,6 +235,14 @@ int read_file(const char *path, buf_t *out)
         buf_append(out, tmp, got);
     int bad = ferror(f);
     fclose(f);
+    /* An empty file left out->data NULL, and callers hand it straight to
+     * strlen()/memcmp() - which is UB for a null pointer. Always leave a
+     * valid, NUL-terminated buffer behind. */
+    if (!out->data) {
+        buf_reserve(out, 0);
+        if (out->data)
+            out->data[0] = 0;
+    }
     return bad ? -1 : 0;
 }
 

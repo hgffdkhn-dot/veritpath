@@ -126,23 +126,25 @@ def vendor_boot(hv=4, page=4096):
         body += b"\0" * ((-len(body)) % page)
     dtb = b"\xd0\x0d\xfe\xed" + b"\0" * 64
     hs = 2128 if hv == 4 else 2112
+    esize = 108
     h = bytearray(hs)
     h[0:8] = b"VNDRBOOT"
     struct.pack_into("<I", h, 8, hv)
     struct.pack_into("<I", h, 12, page)
     struct.pack_into("<I", h, 24, len(body))
     struct.pack_into("<I", h, 2096, len(dtb))
+    # the table metadata must be in the header *before* it is copied out -
+    # writing it afterwards only touched the bytearray we cloned from
+    struct.pack_into("<I", h, 2108, esize * len(ents))   # vendor_ramdisk_table_size
+    struct.pack_into("<I", h, 2112, len(ents))           # table num
+    struct.pack_into("<I", h, 2116, esize)               # entry size
+    struct.pack_into("<I", h, 2120, 0)                   # bootconfig size
     out = bytearray(h)
     out += b"\0" * (ru(hs, page) - hs)
     out += bytes(body)
     out += b"\0" * (ru(len(body), page) - len(body))
     out += dtb
     out += b"\0" * (ru(len(dtb), page) - len(dtb))
-    esize = 108
-    struct.pack_into("<I", h, 2108, esize * len(ents))   # vendor_ramdisk_table_size
-    struct.pack_into("<I", h, 2112, len(ents))           # table num
-    struct.pack_into("<I", h, 2116, esize)               # entry size
-    struct.pack_into("<I", h, 2120, 0)                   # bootconfig size
     for size, off, typ, name in ents:
         e = bytearray(esize)
         struct.pack_into("<I", e, 0, size)
@@ -165,6 +167,60 @@ def basic_ramdisk():
             ("bin", 0o120777, b"/system/bin"),
         ]
     )
+
+
+def verify_frags(path):
+    """Check a vendor_boot keeps one ramdisk fragment per table entry."""
+    d = open(path, "rb").read()
+    if d[:8] != b"VNDRBOOT":
+        raise SystemExit("  not a vendor_boot image")
+    hv = struct.unpack_from("<I", d, 8)[0]
+    page = struct.unpack_from("<I", d, 12)[0] or 4096
+    rs = struct.unpack_from("<I", d, 24)[0]
+    dtb = struct.unpack_from("<I", d, 2096)[0]
+    hs = 2128 if hv == 4 else 2112
+    off = ru(hs, page)
+    ramdisk = d[off:off + rs]
+    off = ru(off + rs, page)
+    off = ru(off + dtb, page)
+    tsize = struct.unpack_from("<I", d, 2108)[0]
+    tnum = struct.unpack_from("<I", d, 2112)[0]
+    esize = struct.unpack_from("<I", d, 2116)[0]
+    if not (tsize and tnum):
+        raise SystemExit("  no fragment table (tsize=%d tnum=%d)" % (tsize, tnum))
+    frags = []
+    for i in range(tnum):
+        e = off + i * esize
+        sz, fo, ft = struct.unpack_from("<III", d, e)
+        name = d[e + 12:e + 44].split(b"\0")[0].decode()
+        frags.append((sz, fo, ft, name))
+    if tnum < 2:
+        raise SystemExit("  expected at least 2 fragments, got %d" % tnum)
+    # offsets must be inside the ramdisk and fragments must not overlap
+    for i, (sz, fo, ft, name) in enumerate(frags):
+        if fo + sz > len(ramdisk):
+            raise SystemExit("  frag%d (%s) extends past the ramdisk: %d+%d > %d"
+                             % (i, name, fo, sz, len(ramdisk)))
+    for i in range(1, len(frags)):
+        prev_end = frags[i - 1][1] + frags[i - 1][0]
+        if frags[i][1] < prev_end:
+            raise SystemExit("  frag%d overlaps frag%d" % (i, i - 1))
+    names = ", ".join("%s(%d@%d)" % (n, sz, fo) for sz, fo, ft, n in frags)
+    print("  verified fragments: %s, ramdisk=%d" % (names, len(ramdisk)))
+    return True
+
+
+def cmd_partition(d):
+    """A whole-partition dd: real image followed by zeros up to the partition
+    size. Repacking drops the padding, which looks like data loss unless the
+    tool says so."""
+    os.makedirs(d, exist_ok=True)
+    img = boot_v3v4(KERNEL, basic_ramdisk(), 4)
+    part = img + b"\0" * (192 * 1024 * 1024 - len(img))
+    open(d + "/partition_dump.img", "wb").write(part)
+    open(d + "/real.img", "wb").write(img)
+    print("  built partition_dump.img (%d MB, %d MB of padding)"
+          % (len(part) >> 20, (len(part) - len(img)) >> 20))
 
 
 def cmd_images(d):
@@ -317,6 +373,10 @@ def main():
             verify_boot(arg)
     elif cmd == "verify-dir":
         verify_dir(arg)
+    elif cmd == "verify-frags":
+        verify_frags(arg)
+    elif cmd == "partition":
+        cmd_partition(arg)
     else:
         print(__doc__)
         return 2

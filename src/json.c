@@ -179,6 +179,8 @@ static json_val *parse_value(jparse_t *s)
 
 int json_parse(const char *text, json_val **out)
 {
+    if (!text || !out)
+        return -1;
     jparse_t s;
     s.p = text;
     s.end = text + strlen(text);

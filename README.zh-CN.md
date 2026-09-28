@@ -209,6 +209,26 @@ veritpath hexdump boot.img
 veritpath analyze --boot boot.img --header-version 3
 ```
 
+### 完全没有 ramdisk（system-as-root）
+
+纯 SAR 设备的 `boot.img` 不含 ramdisk——内核把 `/system` 挂成 `/`，直接跑
+`/system/bin/init`。`analyze` 会报 `LAYOUT:no_ramdisk` 和 `NEEDS_RAMDISK:1`。
+
+```bash
+veritpath inject --boot boot.img -p my-su --create-ramdisk -o out/
+```
+
+不加这个 flag 会直接失败退出，不会写出一个没动过的镜像。生成的 `/init` 只是占位，
+必须在 payload 里提供真正的静态 init（`{"src": "init", "dest": "/init"}`），
+否则开不了机。详见 [docs/DEVELOPERS.md](docs/DEVELOPERS.md) 第十节。
+
+### 输出比输入小很多
+
+不是数据丢失。`dd` 整个分区（`/dev/block/by-name/boot_a`）会把真实镜像之后的 0
+填充一起拷出来，重打包只输出镜像本身。192MB 的分区 dump 里真实镜像只有 42MB，
+输出 42MB 是正确结果。`analyze` 会输出 `TRAILING.<角色>:<字节数>`（JSON 里是
+`trailing` 字段）并附一句说明。要保留填充就加 `--keep-trailing`。
+
 ### `no such file`
 
 报错会列出它解析出的路径、当前工作目录、该目录里实际有什么，以及最接近的
@@ -260,5 +280,6 @@ bash tests/run.sh          # 68 项检查，自包含（只需 cc + python3）
 
 `tests/imgkit.py` 用纯标准库构建合成镜像并校验注入产物，不依赖任何第三方包。
 
-已知限制：重建 `vendor_boot.img` 时会把多个 ramdisk fragment 合并成一个。
-payload 仍会进入 vendor ramdisk，但 fragment 分隔暂不保留。
+`vendor_boot.img` 的处理：ramdisk 按 fragment 表切分（而不是靠嗅探压缩格式），
+每个 fragment 独立重建，表里的 size / offset 会按原图约定（页对齐或紧挨）重写。
+每个 vendor ramdisk fragment 都会收到 payload。

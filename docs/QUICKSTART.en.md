@@ -159,6 +159,8 @@ veritpath repack work/ -o init_boot.new.img
 | `--format NAME` | force ramdisk compression (gzip / lz4_legacy / …) |
 | `--patch-vendor-boot` | also patch the vendor ramdisk (recovery/fastbootd) |
 | `--force` | ignore warnings, allow re-injection |
+| `--create-ramdisk` | build a ramdisk when the image has none (SAR devices) |
+| `--keep-trailing` | carry bytes after the image into the output (partition dumps) |
 | `--dry-run` | patch in memory, write nothing |
 | `--brief` | compact KEY:VALUE output from analyze |
 | `--json` | machine readable output |
@@ -174,3 +176,37 @@ veritpath hexdump boot.img     # start here if it will not parse
 It prints the file size, the first 64 bytes as hex + ASCII, the magic, and the
 values at `@8/@12/@20/@24/@36/@40`, plus what veritpath itself concluded. Paste
 that output when asking for help.
+### Why is the output much smaller than the input?
+
+**This is not data loss.** `dd if=/dev/block/by-name/boot_a of=boot.img` copies
+the **whole partition**, and the real boot image is usually smaller than that —
+the rest is zero padding. Repacking emits the image itself, so the padding goes
+away.
+
+veritpath says so explicitly:
+
+```
+ramdisk_layout       boot
+...
+  · boot: the file holds 72.0MiB that is not part of the boot image - a whole-partition
+    dump (dd of /dev/block/by-name/...). That padding is dropped when repacking, so the
+    output is smaller than the input. This is correct, not data loss.
+```
+
+With `--brief` you get `TRAILING.boot:75448320`; with `--json`, a `trailing`
+object.
+
+So a 192MB partition dump whose real image is 42MB producing a 42MB output is
+working correctly.
+
+**To extract just the real image**, compute the length from the header sizes
+(`veritpath hexdump boot.img` prints them).
+
+**To carry the tail over anyway** (a few vendors append data after the image):
+
+```bash
+veritpath inject --boot boot.img -p my-su --keep-trailing -o out/
+```
+
+The bytes are appended to the output untouched; the image itself is unaffected
+and `verify` still passes.

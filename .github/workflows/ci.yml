@@ -18,6 +18,12 @@ jobs:
       - name: Regression suite
         run: bash tests/run.sh build/veritpath
 
+      # Truncated images read past the buffer at fixed header offsets before;
+      # this must stay green.
+      - name: Truncation fuzzer under ASan + UBSan
+        run: |
+          make fuzz-asan
+
       - name: Strict build (clang, -Werror) and rerun
         run: |
           make clean
@@ -124,6 +130,19 @@ jobs:
       # binding still gets compiled and actually exercised.
       - name: JNI binding compiles and runs the CLI
         run: bash tools/test_jni.sh
+
+      # Guards the exact mistake a downstream dev hit: images passed as bare
+      # positionals, which the CLI silently ignored.
+      - name: Java wrapper matches the JNI layer
+        run: python3 tools/check_java.py jni/dev/veritpath/Veritpath.java jni/veritpath_jni.c
+
+      - name: A bare image path still works
+        run: |
+          make
+          python3 -c "import sys; sys.path.insert(0,'tests'); import imgkit; imgkit.cmd_images('/tmp/vp_ci')"
+          ./build/veritpath analyze --brief /tmp/vp_ci/init_boot.img | grep -q '^TARGET:init_boot$'
+          ./build/veritpath inject /tmp/vp_ci/init_boot.img -p payloads/example-su -o /tmp/vp_ci/out
+          ./build/veritpath verify /tmp/vp_ci/out/init_boot.veritpath.img | grep -q '^VERDICT:OK$' 
 
   macos:
     runs-on: macos-latest

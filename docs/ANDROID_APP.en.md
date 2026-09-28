@@ -69,8 +69,9 @@ Then copy `jniLibs/` straight into `app/src/main/` — no CMake needed.
 ### 3. Call it from Java
 
 ```java
-Veritpath.Result r = Veritpath.run(
-        "analyze", "--brief", "--boot", bootFile.getAbsolutePath());
+Veritpath.Result r = Veritpath.analyze(
+        Veritpath.Image.initBoot(initBootPath),
+        Veritpath.Image.boot(bootPath));
 
 if (r.ok()) {
     String arch   = r.line("ARCH");     // "arm64"
@@ -78,18 +79,27 @@ if (r.ok()) {
 }
 
 // or get JSON directly
-String json = Veritpath.analyzeJson("--boot", bootPath);
+String json = Veritpath.analyzeJson(Veritpath.Image.boot(bootPath));
 ```
 
 Injecting:
 
 ```java
 Veritpath.Result r = Veritpath.inject(
-        payloadDir,                 // -p
-        outputDir,                  // -o
-        "--init-boot", initBootPath // image arguments
-);
+        Veritpath.Image.initBoot(initBootPath),
+        payloadDir,
+        outputDir);
 ```
+
+Build images with `Image.boot()` / `initBoot()` / `vendorBoot()` /
+`recovery()` / `auto()` so the flag can never be wrong or missing. Use
+`analyzeRaw(...)` or `run(...)` when you want full control.
+
+> An earlier `inject(payloadDir, outputPath, images...)` passed images as bare
+> positionals, but the CLI only recognises `--boot` / `--init-boot` /
+> `--vendor-boot` / `--recovery`, so getopt dropped them and no image was
+> loaded. The CLI now accepts a bare path too (detecting the role itself), and
+> the Java side is typed, so the mistake cannot recur.
 
 Check before flashing:
 
@@ -174,3 +184,28 @@ bash tools/test_jni.sh
 It generates a minimal `jni.h` stub, builds the binding, and drives it with a
 working JNIEnv to run `analyze --brief`, checking that the captured output
 actually contains `ARCH:`. CI runs this too.
+
+## Troubleshooting
+
+### `no input images given`
+
+No image was loaded. Usual causes:
+
+1. **The image was passed as a bare positional** — older CLI builds only honour
+   `--boot` / `--init-boot` / `--vendor-boot` / `--recovery`. Current builds
+   accept a bare path and detect the role, but passing the flag explicitly is
+   still clearer.
+2. **The path is missing or unreadable** — the error prints the resolved path,
+   the working directory and a suggestion.
+3. **The file is not a boot image** — run `hexdump` and check the first 8 bytes
+   for `ANDROID!` or `VNDRBOOT`.
+
+```java
+// see what the command actually looks like
+Log.d("vp", String.join(" ", args));
+```
+
+### Two images supplied but `TARGET` is none
+
+Neither parsed to a ramdisk. `analyze` lists `header_version` and
+`ramdisk_size` per image, so you can see which one came up empty.
