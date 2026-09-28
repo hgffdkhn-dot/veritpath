@@ -109,6 +109,22 @@ jobs:
           cc -O2 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc src/*.c -lz -o /tmp/vp-g
           cc -O2 -std=c17 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Isrc src/*.c -lz -o /tmp/vp-p
 
+  library:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Static and shared library targets
+        run: |
+          make lib
+          make lib-shared
+          ls -l build/libveritpath.a build/libveritpath.so
+
+      # No NDK here: tools/make_stub_jni.py provides a minimal jni.h so the
+      # binding still gets compiled and actually exercised.
+      - name: JNI binding compiles and runs the CLI
+        run: bash tools/test_jni.sh
+
   macos:
     runs-on: macos-latest
     steps:

@@ -58,6 +58,14 @@ void *vp_memmem(const void *hay, size_t haylen, const void *needle, size_t needl
 char *path_join(const char *a, const char *b);
 char *path_dirname(const char *path);
 int dir_in_path(const char *dir, const char *path);
+
+/* run the CLI without process exit: for embedders (JNI, tests, other tools) */
+void vp_set_program_name(const char *name);
+int vp_cli_run(int argc, char **argv);
+
+/* capture what vp_cli_run prints, as a malloc'd string */
+int vp_capture_start(void);
+char *vp_capture_stop(void);
 char *replace_suffix(const char *path, const char *suffix); /* stem + suffix */
 
 /* ---------------------------------------------------------- compression */

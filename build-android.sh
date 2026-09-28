@@ -104,6 +104,33 @@ fi
 TRIPLES=(aarch64-linux-android armv7a-linux-androideabi x86_64-linux-android i686-linux-android)
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
 
+# --jni builds libveritpath.so for APKs instead of a command-line binary
+if [ "${1:-}" = "--jni" ] || [ "${1:-}" = "jni" ]; then
+    ABI_WANT="${2:-all}"
+    echo "==> building the JNI shared library"
+    [ "$ON_DEVICE" = 0 ] || { echo "on-device builds use the system clang"; }
+    for i in "${!ABIS[@]}"; do
+        abi="${ABIS[$i]}"
+        triple="${TRIPLES[$i]}"
+        [ "$ABI_WANT" != "all" ] && [ "$ABI_WANT" != "$abi" ] && continue
+        outdir="$OUT/jniLibs/$abi"
+        mkdir -p "$outdir"
+        if [ "$ON_DEVICE" = 1 ]; then
+            "$CC_BIN" -O2 -std=c11 -Wall -Wextra -DVP_NO_MAIN -Isrc -fPIC -shared \
+                -Wl,-z,max-page-size=16384 "${SRCS[@]}" jni/veritpath_jni.c -lz \
+                -o "$outdir/libveritpath.so"
+        else
+            "$CC_BIN" --target="${triple}${API}" -O2 -std=c11 -Wall -Wextra \
+                -DVP_NO_MAIN -Isrc -fPIC -shared -Wl,-z,max-page-size=16384 \
+                "${SRCS[@]}" jni/veritpath_jni.c -lz -o "$outdir/libveritpath.so"
+        fi
+        echo "    -> $outdir/libveritpath.so"
+    done
+    echo
+    echo "copy jniLibs/ into app/src/main/ of your Android Studio project"
+    exit 0
+fi
+
 WANT="${1:-all}"
 built=0
 

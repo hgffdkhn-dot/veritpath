@@ -73,3 +73,37 @@ test: $(TARGET)
 
 clean:
 	rm -rf $(OBJDIR)
+
+# Library builds: for embedding veritpath in another program or in an APK.
+# VP_NO_MAIN keeps the CLI entry point out of the object files.
+LIB_SRCS := $(wildcard src/*.c)
+LIB_OBJS := $(patsubst src/%.c,build/lib/%.o,$(LIB_SRCS))
+
+build/lib/%.o: src/%.c src/vp.h
+	@mkdir -p build/lib
+	$(CC) $(CFLAGS) -DVP_NO_MAIN -c $< -o $@
+
+lib: $(LIB_OBJS)
+	@mkdir -p build
+	$(AR) rcs build/libveritpath.a $(LIB_OBJS)
+	@echo "  -> build/libveritpath.a"
+
+lib-shared: $(LIB_OBJS)
+	@mkdir -p build
+	$(CC) -shared -o build/libveritpath.so $(LIB_OBJS) $(LDLIBS)
+	@echo "  -> build/libveritpath.so"
+
+# JNI shared object for APKs; needs the real jni.h from an NDK/JDK
+lib-jni: build/lib/veritpath_jni.o $(LIB_OBJS)
+	@mkdir -p build
+	$(CC) -shared -o build/libveritpath_jni.so build/lib/veritpath_jni.o $(LIB_OBJS) $(LDLIBS)
+	@echo "  -> build/libveritpath_jni.so"
+
+build/lib/veritpath_jni.o: jni/veritpath_jni.c src/vp.h
+	@mkdir -p build/lib
+	$(CC) $(CFLAGS) -DVP_NO_MAIN -Isrc -I$(JNI_INCLUDE) -c $< -o $@
+
+jni-test:
+	bash tools/test_jni.sh
+
+.PHONY: lib lib-shared lib-jni jni-test

@@ -52,7 +52,7 @@ static void usage(void)
     puts("      --no-backup      do not keep a backup of the original image");
     puts("      --dry-run        patch in memory only, write nothing");
     puts("      --json           machine readable output");
-    puts("      --brief          compact KEY:VALUE output (magiskboot style)");
+    puts("  -b, --brief          compact KEY:VALUE output (magiskboot style)");
     puts("      --header-version N  force a header version (0-4, diagnostics)");
     puts("");
     puts("examples:");
@@ -101,7 +101,7 @@ static void parse_args(int argc, char **argv, args_t *a)
     options_init(&a->opts);
     optind = 1;
     for (;;) {
-        int c = getopt_long(argc, argv, "p:o:d:B:I:V:R:c:g:F:fDnPjSvhH:", kLongOpts, NULL);
+        int c = getopt_long(argc, argv, "p:o:d:B:I:V:R:c:g:F:fDnPjSvhH:b", kLongOpts, NULL);
         if (c == -1)
             break;
         switch (c) {
@@ -807,13 +807,23 @@ static int cmd_repack(args_t *a)
     return 0;
 }
 
-int main(int argc, char **argv)
+/* argv[0] is the sub-command (no program name) so embedders can pass exactly
+ * what a user would type after "veritpath". */
+static const char *g_program_name = "veritpath";
+
+void vp_set_program_name(const char *name)
 {
-    if (argc < 2) {
+    if (name && *name)
+        g_program_name = name;
+}
+
+int vp_cli_run(int argc, char **argv)
+{
+    if (argc < 1 || !argv || !argv[0]) {
         usage();
         return 1;
     }
-    const char *cmd = argv[1];
+    const char *cmd = argv[0];
     if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0 ||
         strcmp(cmd, "help") == 0) {
         usage();
@@ -824,24 +834,26 @@ int main(int argc, char **argv)
         return 0;
     }
     args_t a;
-    parse_args(argc - 1, argv + 1, &a);
+    /* parse_args() skips argv[0] the way getopt expects a program name, and
+     * here argv[0] is the sub-command - so hand it the array as-is. */
+    parse_args(argc, argv, &a);
     if (strcmp(cmd, "hexdump") == 0)
         return cmd_hexdump(&a);
     if (strcmp(cmd, "doctor") == 0) {
         printf("VERSION:%s\n", VP_VERSION);
-        printf("BINARY:%s\n", argv[0]);
+        printf("BINARY:%s\n", g_program_name);
         /* A bare `veritpath` only resolves when its directory is on PATH.
          * On many Android shells it is not, and users then hit
          * "inaccessible or not found" even though the binary is right there. */
         const char *path = getenv("PATH");
         int on_path = 0;
-        if (path && argv[0]) {
-            if (!strchr(argv[0], '/')) {
+        if (path && g_program_name) {
+            if (!strchr(g_program_name, '/')) {
                 /* invoked as a bare name: the shell already resolved it,
                  * so it must have come from PATH */
                 on_path = 1;
             } else {
-                char *dir = path_dirname(argv[0]);
+                char *dir = path_dirname(g_program_name);
                 if (dir) {
                     on_path = dir_in_path(dir, path);
                     free(dir);
@@ -873,3 +885,14 @@ int main(int argc, char **argv)
     usage();
     return 1;
 }
+
+/* Library builds (the shared object and the JNI binding) define VP_NO_MAIN so
+ * they do not carry a second main(). */
+#ifndef VP_NO_MAIN
+int main(int argc, char **argv)
+{
+    if (argc > 0)
+        vp_set_program_name(argv[0]);
+    return vp_cli_run(argc - 1, argv + 1);
+}
+#endif

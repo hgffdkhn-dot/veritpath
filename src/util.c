@@ -413,3 +413,70 @@ void vp_report_missing(const char *role, const char *path)
     }
     closedir(d);
 }
+
+/* --------------------------------------------------------- output capture
+ *
+ * Embedders (the JNI binding, unit tests, other tools) need the command output
+ * as a string instead of on stdout. Duplicate the fd onto a temp file rather
+ * than reassigning the stdout FILE*, which is not portable.
+ */
+static int g_saved_fd = -1;
+static FILE *g_cap_file = NULL;
+
+int vp_capture_start(void)
+{
+    if (g_cap_file)
+        return -1;                      /* already capturing */
+    fflush(stdout);
+    fflush(stderr);
+    g_cap_file = tmpfile();
+    if (!g_cap_file)
+        return -1;
+    g_saved_fd = dup(STDOUT_FILENO);
+    if (g_saved_fd < 0) {
+        fclose(g_cap_file);
+        g_cap_file = NULL;
+        return -1;
+    }
+    if (dup2(fileno(g_cap_file), STDOUT_FILENO) < 0) {
+        close(g_saved_fd);
+        g_saved_fd = -1;
+        fclose(g_cap_file);
+        g_cap_file = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+char *vp_capture_stop(void)
+{
+    fflush(stdout);
+    if (g_saved_fd >= 0) {
+        dup2(g_saved_fd, STDOUT_FILENO);
+        close(g_saved_fd);
+        g_saved_fd = -1;
+    }
+    if (!g_cap_file)
+        return NULL;
+
+    rewind(g_cap_file);
+    size_t cap = 4096, len = 0;
+    char *buf = xmalloc(cap);
+    for (;;) {
+        if (len + 1024 > cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb)
+                break;
+            buf = nb;
+        }
+        size_t n = fread(buf + len, 1, cap - len - 1, g_cap_file);
+        len += n;
+        if (n == 0)
+            break;
+    }
+    buf[len] = 0;
+    fclose(g_cap_file);
+    g_cap_file = NULL;
+    return buf;
+}

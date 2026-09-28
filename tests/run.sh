@@ -152,6 +152,12 @@ out=$("$BIN" analyze --brief --boot "$WORK/img/boot.img" --init-boot "$WORK/img/
 check "--brief keeps KEY:VALUE"      "$(grep -c '^ARCH:arm64$' <<<"$out")" "1"
 check "--brief drops the report"     "$(grep -c 'boot image analysis' <<<"$out")" "0"
 
+# -b is the short form of --brief; it was registered in the switch but missing
+# from the getopt string, so it silently produced the rich report
+out=$("$BIN" analyze -b --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img")
+check "-b matches --brief"           "$(grep -c '^ARCH:arm64$' <<<"$out")" "1"
+check "-b drops the report"          "$(grep -c 'boot image analysis' <<<"$out")" "0"
+
 out=$("$BIN" analyze --json --boot "$WORK/img/boot.img" --init-boot "$WORK/img/init_boot.img")
 check "--json still parses"          "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["target"])' <<<"$out")" "init_boot"
 
@@ -176,6 +182,23 @@ out=$("$BIN" payload-check "$PAY")
 check "payload-check names it"   "$(grep -c '^NAME:example-su$' <<<"$out")" "1"
 check "payload-check lists files" "$(grep -c '^FILES:1$' <<<"$out")" "1"
 check "payload-check lists rc"   "$(grep -c '^RC:/init.veritpath.rc$' <<<"$out")" "1"
+
+# ------------------------------------------------------------------- library
+echo "== embeddable library + JNI binding"
+# VP_NO_MAIN keeps the CLI's main() out, the way a shared library is built
+if cc -O2 -std=c11 -DVP_NO_MAIN -Isrc -c src/util.c -o "$WORK/util.o" 2>/dev/null; then
+    ok "sources compile without main() (library build)"
+else
+    bad "sources compile without main() (library build)"
+fi
+if [ -f tools/make_stub_jni.py ] && command -v python3 >/dev/null 2>&1; then
+    if bash tools/test_jni.sh "$BIN" >"$WORK/jni.log" 2>&1; then
+        ok "JNI binding runs the CLI and returns output"
+    else
+        bad "JNI binding runs the CLI and returns output"
+        sed 's/^/        /' "$WORK/jni.log" | head -10
+    fi
+fi
 
 # ------------------------------------------------------------------ errors
 echo "== error handling"
