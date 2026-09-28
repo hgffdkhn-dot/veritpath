@@ -65,14 +65,7 @@ bash build-android.sh --jni
 
 ### 3. Java 里调用
 
-**初始化（只需一次，放在 `Application.onCreate`）：**
-
-```java
-Veritpath.setTempDir(getCacheDir().getAbsolutePath());
-```
-
-不加这一行，native 侧会自己找可写目录，而安卓上往往一个都找不到——`/tmp` 不存在、
-当前目录是 `/`、`TMPDIR` 未设置。捕获失败后每次调用都返回空字符串。详见文末排错。
+**初始化**：不需要。捕获走的是管道 + 内存，不碰文件系统。
 
 ```java
 Veritpath.Result r = Veritpath.analyze(
@@ -209,17 +202,12 @@ Log.d("vp", String.join(" ", args));
 
 1. **命令失败了，错误信息在 stderr。** 早期版本只捕获 stdout，失败时拿到的就是空
    字符串。现在 stdout 和 stderr 一起捕获，失败也能拿到错误原文。
-2. **找不到可写目录。** 旧实现用 `tmpfile()`，安卓上没有 `/tmp`，应用进程里
-   `TMPDIR` 通常未设置、当前目录是 `/`，于是 `tmpfile()` 返回 NULL，捕获直接失败。
+2. **早期版本依赖临时文件，在安卓上必然失败。** 旧实现用 `tmpfile()`，然后依次猜
+   `/tmp`、`/data/local/tmp`、当前目录——这些在普通应用进程里**一个都写不了**（`/tmp`
+   不存在，`/data/local/tmp` 属于 shell，当前目录是 `/`）。猜目录这个思路本身就是错的。
 
-解决办法就是初始化时给一个确定可写的目录：
+现在改成**管道 + 内存**：`pipe()` 建一个管道，把 stdout 和 stderr 都重定向过去，
+读出来放进内存缓冲。**完全不碰文件系统，不需要任何权限，也不需要可写目录。**
+写端设为非阻塞，所以单线程调用也不会死锁。
 
-```java
-Veritpath.setTempDir(getCacheDir().getAbsolutePath());
-```
-
-现在的实现会依次尝试：你设的目录 → `TMPDIR` → `P_tmpdir` → `/tmp` →
-`/data/local/tmp` → 当前目录。临时文件创建后立即 `unlink`，不会留下垃圾。
-
-万一全部失败，`nativeRun` 不再返回空字符串，而是返回一句说明，告诉你该调
-`setTempDir()`。
+`setTempDir()` 现在只是给不支持 `pipe()` 的平台兜底，正常情况不用调。

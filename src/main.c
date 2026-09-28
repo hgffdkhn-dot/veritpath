@@ -105,6 +105,10 @@ typedef struct {
     int brief;
 } args_t;
 
+/* usage() must not exit: an embedder calling us with "-h" would otherwise take
+ * its whole process down. */
+static int g_help_shown = 0;
+
 static void parse_args(int argc, char **argv, args_t *a)
 {
     memset(a, 0, sizeof(*a));
@@ -136,7 +140,7 @@ static void parse_args(int argc, char **argv, args_t *a)
         case 'b': a->brief = 1; break;
         case 'v': vp_set_verbose(1); break;
         case 'H': vp_forced_header_version = atoi(optarg); break;
-        case 'h': usage(); exit(0);
+        case 'h': usage(); g_help_shown = 1; break;
         default: break;
         }
     }
@@ -1140,6 +1144,8 @@ int vp_cli_run(int argc, char **argv)
     /* parse_args() skips argv[0] the way getopt expects a program name, and
      * here argv[0] is the sub-command - so hand it the array as-is. */
     parse_args(argc, argv, &a);
+    if (g_help_shown)
+        return 0;
     if (strcmp(cmd, "hexdump") == 0)
         return cmd_hexdump(&a);
     if (strcmp(cmd, "doctor") == 0) {

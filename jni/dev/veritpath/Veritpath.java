@@ -80,18 +80,13 @@ public final class Veritpath {
     private Veritpath() {}
 
     /**
-     * Sets the directory used for output capture.
+     * Optional. Sets a fallback directory for output capture on platforms
+     * without pipes.
      *
-     * <p>Do this once at startup, before any command:
-     *
-     * <pre>{@code
-     * Veritpath.setTempDir(getCacheDir().getAbsolutePath());
-     * }</pre>
-     *
-     * <p>Without it the native side looks for a writable directory itself, and
-     * on Android there often is none: {@code /tmp} does not exist, the current
-     * directory is {@code "/"} and {@code TMPDIR} is unset. Capture then fails
-     * and every call comes back with an empty string.
+     * <p><b>You do not need this on Android or Linux.</b> Capture is a pipe
+     * drained into memory, so it needs no writable directory at all. This is
+     * only a last resort for exotic platforms where {@code pipe()} is
+     * unavailable.
      *
      * @param dir a directory the app can write to, e.g. {@code getCacheDir()}
      */

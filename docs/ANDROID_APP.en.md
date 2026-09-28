@@ -68,16 +68,8 @@ Then copy `jniLibs/` straight into `app/src/main/` — no CMake needed.
 
 ### 3. Call it from Java
 
-**Initialise once, in `Application.onCreate`:**
-
-```java
-Veritpath.setTempDir(getCacheDir().getAbsolutePath());
-```
-
-Without it the native side hunts for a writable directory, and on Android there
-often is none: `/tmp` does not exist, the current directory is `/`, and `TMPDIR`
-is unset. Capture then fails and every call returns an empty string. See
-troubleshooting below.
+**Initialisation: none needed.** Capture goes through a pipe drained into
+memory — it never touches the filesystem.
 
 ```java
 Veritpath.Result r = Veritpath.analyze(
@@ -228,19 +220,16 @@ Two causes, both fixed — but the usage matters:
 1. **The command failed and its errors went to stderr.** Earlier builds captured
    only stdout, so a failure produced an empty string. stdout and stderr are now
    captured together, so a failing command still returns its error text.
-2. **No writable directory.** The old code used `tmpfile()`, which fails on
-   Android: there is no `/tmp`, `TMPDIR` is normally unset inside an app, and the
-   current directory is `/`. Capture then failed outright.
+2. **Earlier builds needed a temp file, which cannot work on Android.** The old
+   code called `tmpfile()` and then guessed at `/tmp`, `/data/local/tmp` and the
+   current directory — **none of which a normal app process can write** (`/tmp`
+   does not exist, `/data/local/tmp` belongs to the shell, the current directory
+   is `/`). Guessing paths was the wrong approach.
 
-Give it a directory you know is writable:
+It is now a **pipe drained into memory**: `pipe()`, redirect both stdout and
+stderr into it, read the result into a buffer. **No filesystem, no permissions,
+no writable directory required.** The write end is non-blocking, so a
+single-threaded caller cannot deadlock.
 
-```java
-Veritpath.setTempDir(getCacheDir().getAbsolutePath());
-```
-
-The implementation now tries, in order: the directory you set → `TMPDIR` →
-`P_tmpdir` → `/tmp` → `/data/local/tmp` → the current directory. The scratch file
-is unlinked immediately after creation, so nothing is left behind.
-
-If every candidate fails, `nativeRun` no longer returns an empty string — it
-returns a message telling you to call `setTempDir()`.
+`setTempDir()` is now only a fallback for platforms without `pipe()`; you do not
+need to call it.

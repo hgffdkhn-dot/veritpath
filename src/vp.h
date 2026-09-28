@@ -63,9 +63,11 @@ int dir_in_path(const char *dir, const char *path);
 void vp_set_program_name(const char *name);
 int vp_cli_run(int argc, char **argv);
 
-/* capture what vp_cli_run prints (stdout *and* stderr), as a malloc'd string.
- * vp_capture_set_dir() picks the scratch directory; without it the caller's
- * environment decides, which fails on Android where /tmp does not exist. */
+/* Capture what vp_cli_run prints (stdout *and* stderr) as a malloc'd string.
+ * The capture is a pipe drained into memory: no filesystem, no permissions, so
+ * it works in an app process that has no writable directory at all.
+ * vp_capture_set_dir() is only a last-resort fallback for platforms where
+ * pipe() is unavailable; normal callers never need it. */
 void vp_capture_set_dir(const char *dir);
 const char *vp_capture_error(void);
 int vp_capture_start(void);

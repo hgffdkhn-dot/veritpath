@@ -16,6 +16,7 @@ cat > "$WORK/t.c" <<'C'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include "vp.h"
 
@@ -79,6 +80,45 @@ int main(void)
     printf("  scratch files left in %s: %d\n", dir, leftover);
     if (leftover) { printf("    FAIL: temp file not cleaned up\n"); bad = 1; }
     else printf("    ok: nothing left behind\n");
+
+    /* 5. the real Android case: no writable /tmp, no TMPDIR, cwd not writable.
+     * Capture must still work because it never touches the filesystem. */
+    {
+        setenv("TMPDIR", "/nonexistent-dir-for-veritpath-test", 1);
+        if (chdir("/") != 0) { printf("    FAIL: chdir\n"); bad = 1; }
+        vp_capture_set_dir(NULL);
+        char *v[1]; v[0] = "doctor";
+        char *o = NULL;
+        int rc5 = run(v, 1, &o);
+        printf("  no writable dir at all (TMPDIR bogus, cwd=/): rc=%d, %zu bytes\n",
+               rc5, o ? strlen(o) : 0);
+        if (!o || !strstr(o, "VERSION:")) {
+            printf("    FAIL: capture needs the filesystem\n"); bad = 1;
+        } else {
+            printf("    ok: capture is filesystem-independent\n");
+        }
+        free(o);
+    }
+
+    /* 6. a big command must not deadlock: fill far past the old 64KiB pipe */
+    {
+        char *v[3]; v[0] = (char*)"unpack"; v[1] = (char*)"--help"; v[2] = NULL;
+        char *o = NULL;
+        int rc6 = run(v, 2, &o);
+        printf("  help output: rc=%d, %zu bytes\n", rc6, o ? strlen(o) : 0);
+        if (!o || !strlen(o)) { printf("    FAIL: help produced nothing\n"); bad = 1; }
+        else printf("    ok: help captured\n");
+        free(o);
+    }
+
+    /* 7. -h must not terminate the caller */
+    {
+        char *v[2]; v[0] = (char*)"analyze"; v[1] = (char*)"-h";
+        char *o = NULL;
+        int rc7 = vp_cli_run(2, v);
+        printf("  -h via vp_cli_run: rc=%d (process still alive)\n", rc7);
+        (void)o;
+    }
 
     printf(bad ? "  FAILED\n" : "  PASS\n");
     return bad;

@@ -13,6 +13,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -425,24 +426,25 @@ void vp_report_missing(const char *role, const char *path)
 /* --------------------------------------------------------- output capture
  *
  * Embedders (the JNI binding, tests, other tools) need a command's output as a
- * string. Two things make this harder than it looks:
+ * string. Two requirements drove this design:
  *
  * 1. Errors go to stderr. Capturing only stdout means a failing command returns
- *    an empty string, which looks like "the tool produced nothing".
- * 2. tmpfile() is unreliable outside a normal Linux desktop: Android has no
- *    /tmp, TMPDIR is usually unset inside an app, and the current directory is
- *    typically "/" (not writable). tmpfile() then returns NULL and every call
- *    silently yields no output.
+ *    an empty string, which reads as "the tool produced nothing".
+ * 2. It must not touch the filesystem. An Android app has no writable /tmp, the
+ *    current directory is "/" (not writable), TMPDIR is unset, and /data/local/tmp
+ *    belongs to the shell - none of them are usable from a normal app process.
+ *    Guessing at those paths just reintroduces the failure.
  *
- * So: search a list of candidate directories, and capture stdout *and* stderr
- * into the same file (they share one file description, so writes interleave
- * correctly).
+ * So: a pipe, drained into memory. No files, no permissions, no paths. The write
+ * end is non-blocking so a single-threaded caller can never deadlock, even if a
+ * command somehow produces more output than the pipe can hold.
  */
+static int g_cap_rfd = -1;
+static int g_cap_wfd = -1;
 static int g_saved_out = -1;
 static int g_saved_err = -1;
-static int g_cap_fd = -1;
-static FILE *g_cap_file = NULL;
-static char *g_cap_dir = NULL;      /* explicit dir, set by the embedder */
+static int g_cap_active = 0;
+static char *g_cap_dir = NULL;   /* optional fallback directory, usually unused */
 static char g_cap_why[256];
 
 void vp_capture_set_dir(const char *dir)
@@ -456,77 +458,77 @@ const char *vp_capture_error(void)
     return g_cap_why[0] ? g_cap_why : NULL;
 }
 
-/* Returns an fd for an anonymous scratch file, or -1. */
-static int open_scratch(void)
+static void set_nonblock(int fd)
 {
-    const char *cands[8];
-    int n = 0;
-    if (g_cap_dir)
-        cands[n++] = g_cap_dir;
-    const char *env = getenv("TMPDIR");
-    if (env && *env)
-        cands[n++] = env;
-#ifdef P_tmpdir
-    cands[n++] = P_tmpdir;
-#endif
-    cands[n++] = "/tmp";
-    cands[n++] = "/data/local/tmp";
-    cands[n++] = ".";
-
 #if defined(_WIN32) || defined(_WIN64)
-    /* mkstemp is not guaranteed on MinGW; tmpfile is fine there */
-    FILE *f = tmpfile();
-    if (!f)
-        return -1;
-    return dup(fileno(f));
+    (void)fd;
 #else
-    for (int i = 0; i < n; i++) {
-        if (!cands[i] || !cands[i][0])
-            continue;
-        size_t len = strlen(cands[i]) + 32;
-        char *tpl = xmalloc(len);
-        snprintf(tpl, len, "%s/.veritpath-XXXXXX", cands[i]);
-        int fd = mkstemp(tpl);
-        if (fd >= 0) {
-            /* unlink straight away: nothing to clean up, even on a crash */
-            unlink(tpl);
-            free(tpl);
-            return fd;
-        }
-        free(tpl);
-    }
-    return -1;
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0)
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+#endif
+}
+
+static void grow_pipe(int fd)
+{
+#if defined(F_SETPIPE_SZ) && !defined(_WIN32) && !defined(_WIN64)
+    /* best effort: 1MiB instead of the default 64KiB */
+    fcntl(fd, F_SETPIPE_SZ, 1 << 20);
+#else
+    (void)fd;
 #endif
 }
 
 int vp_capture_start(void)
 {
-    if (g_cap_file)
+    if (g_cap_active)
         return -1;
     fflush(stdout);
     fflush(stderr);
-
     g_cap_why[0] = 0;
-    int fd = open_scratch();
-    if (fd < 0) {
-        snprintf(g_cap_why, sizeof(g_cap_why),
-                 "cannot create a scratch file for output capture; "
-                 "call vp_capture_set_dir() with a writable directory");
-        return -1;
+
+    int fds[2];
+    int got = 0;
+#if defined(_WIN32) || defined(_WIN64)
+    got = (_pipe(fds, 1 << 16, _O_BINARY) == 0);
+#else
+    got = (pipe(fds) == 0);
+#endif
+    if (!got) {
+        /* Last resort, and only where the caller said it is safe. No guessing:
+         * an app process has no writable /tmp, and /data/local/tmp belongs to
+         * the shell - trying them just fails again. */
+        if (!g_cap_dir) {
+            snprintf(g_cap_why, sizeof(g_cap_why),
+                     "cannot create a pipe for output capture");
+            return -1;
+        }
+        size_t len = strlen(g_cap_dir) + 32;
+        char *tpl = xmalloc(len);
+        snprintf(tpl, len, "%s/.veritpath-XXXXXX", g_cap_dir);
+        int fd = mkstemp(tpl);
+        free(tpl);
+        if (fd < 0) {
+            snprintf(g_cap_why, sizeof(g_cap_why),
+                     "cannot create a scratch file in %s", g_cap_dir);
+            return -1;
+        }
+        fds[0] = fd;
+        fds[1] = dup(fd);
     }
-    FILE *f = fdopen(fd, "w+");
-    if (!f) {
-        close(fd);
-        snprintf(g_cap_why, sizeof(g_cap_why), "cannot fdopen the scratch file");
-        return -1;
-    }
-    g_cap_fd = fd;
-    g_cap_file = f;
+    grow_pipe(fds[1]);
+    set_nonblock(fds[1]);
+
     g_saved_out = dup(STDOUT_FILENO);
     g_saved_err = dup(STDERR_FILENO);
-    /* both point at the same file description, so they share one offset */
-    dup2(fd, STDOUT_FILENO);
-    dup2(fd, STDERR_FILENO);
+    /* both ends share one file description, so stdout and stderr interleave in
+     * the order they were written */
+    dup2(fds[1], STDOUT_FILENO);
+    dup2(fds[1], STDERR_FILENO);
+
+    g_cap_rfd = fds[0];
+    g_cap_wfd = fds[1];
+    g_cap_active = 1;
     return 0;
 }
 
@@ -534,6 +536,7 @@ char *vp_capture_stop(void)
 {
     fflush(stdout);
     fflush(stderr);
+
     if (g_saved_err >= 0) {
         dup2(g_saved_err, STDERR_FILENO);
         close(g_saved_err);
@@ -544,28 +547,46 @@ char *vp_capture_stop(void)
         close(g_saved_out);
         g_saved_out = -1;
     }
-    if (!g_cap_file)
+    /* a write may have hit EAGAIN while the pipe was in non-blocking mode */
+    clearerr(stdout);
+    clearerr(stderr);
+
+    if (!g_cap_active)
         return NULL;
 
-    rewind(g_cap_file);
-    size_t cap = 4096, len = 0;
+    if (g_cap_wfd >= 0) {
+        close(g_cap_wfd);
+        g_cap_wfd = -1;
+    }
+
+    size_t cap = 8192, len = 0;
     char *buf = xmalloc(cap);
     for (;;) {
-        if (len + 1024 > cap) {
+        if (len + 4096 > cap) {
             cap *= 2;
             char *nb = realloc(buf, cap);
             if (!nb)
                 break;
             buf = nb;
         }
-        size_t n = fread(buf + len, 1, cap - len - 1, g_cap_file);
-        len += n;
+#if defined(_WIN32) || defined(_WIN64)
+        int n = _read(g_cap_rfd, buf + len, (unsigned)(cap - len - 1));
+#else
+        ssize_t n = read(g_cap_rfd, buf + len, cap - len - 1);
+#endif
+        if (n > 0) {
+            len += n;
+            continue;
+        }
         if (n == 0)
             break;
+        if (errno == EINTR)
+            continue;
+        break;
     }
     buf[len] = 0;
-    fclose(g_cap_file);
-    g_cap_file = NULL;
-    g_cap_fd = -1;
+    close(g_cap_rfd);
+    g_cap_rfd = -1;
+    g_cap_active = 0;
     return buf;
 }
