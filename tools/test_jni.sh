@@ -68,6 +68,30 @@ int main(int argc, char **argv)
     if (rc2 == 0) { printf("FAIL: bad command should fail\n"); return 1; }
     printf("  bad cmd  : exit %d (as expected)\n", (int)rc2);
 
+    /* the error text must be visible to the embedder: an app cannot read
+     * logcat, so an uncaptured stderr means "no output at all" */
+    const char *err = (const char *)Java_dev_veritpath_Veritpath_nativeLastOutput(env, NULL);
+    if (!err || !strstr(err, "no-such-command")) {
+        printf("FAIL: the error text was not captured\n");
+        return 1;
+    }
+    printf("  error    : visible to the caller (%zu bytes)\n", strlen(err));
+
+    /* with an explicit temp dir, capture must not depend on /tmp existing */
+    {
+        jstring d = (jstring)"/tmp";
+        Java_dev_veritpath_Veritpath_nativeSetTempDir(env, NULL, d);
+        const char *v[1]; v[0] = "doctor";
+        fake_arr vv = { v, 1 };
+        jint rc3 = Java_dev_veritpath_Veritpath_nativeRun(env, NULL, (jobjectArray)&vv);
+        const char *o3 = (const char *)Java_dev_veritpath_Veritpath_nativeLastOutput(env, NULL);
+        if (rc3 != 0 || !o3 || !strstr(o3, "VERSION:")) {
+            printf("FAIL: capture with an explicit dir\n");
+            return 1;
+        }
+        printf("  tempdir  : explicit dir works\n");
+    }
+
     printf("  PASS\n");
     return 0;
 }

@@ -65,6 +65,15 @@ bash build-android.sh --jni
 
 ### 3. Java 里调用
 
+**初始化（只需一次，放在 `Application.onCreate`）：**
+
+```java
+Veritpath.setTempDir(getCacheDir().getAbsolutePath());
+```
+
+不加这一行，native 侧会自己找可写目录，而安卓上往往一个都找不到——`/tmp` 不存在、
+当前目录是 `/`、`TMPDIR` 未设置。捕获失败后每次调用都返回空字符串。详见文末排错。
+
 ```java
 Veritpath.Result r = Veritpath.analyze(
         Veritpath.Image.initBoot(initBootPath),
@@ -193,3 +202,24 @@ Log.d("vp", String.join(" ", args));
 
 说明两个都没解析出 ramdisk。`analyze` 会在报告里逐块列出每个镜像的
 `header_version` 和 `ramdisk_size`，看哪一块是空的。
+
+### 调用后 `output` 是空的
+
+两个原因，都已修，但用法上要注意：
+
+1. **命令失败了，错误信息在 stderr。** 早期版本只捕获 stdout，失败时拿到的就是空
+   字符串。现在 stdout 和 stderr 一起捕获，失败也能拿到错误原文。
+2. **找不到可写目录。** 旧实现用 `tmpfile()`，安卓上没有 `/tmp`，应用进程里
+   `TMPDIR` 通常未设置、当前目录是 `/`，于是 `tmpfile()` 返回 NULL，捕获直接失败。
+
+解决办法就是初始化时给一个确定可写的目录：
+
+```java
+Veritpath.setTempDir(getCacheDir().getAbsolutePath());
+```
+
+现在的实现会依次尝试：你设的目录 → `TMPDIR` → `P_tmpdir` → `/tmp` →
+`/data/local/tmp` → 当前目录。临时文件创建后立即 `unlink`，不会留下垃圾。
+
+万一全部失败，`nativeRun` 不再返回空字符串，而是返回一句说明，告诉你该调
+`setTempDir()`。

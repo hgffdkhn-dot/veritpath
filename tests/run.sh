@@ -203,6 +203,16 @@ if cc -O2 -std=c11 -DVP_NO_MAIN -Isrc -c src/util.c -o "$WORK/util.o" 2>/dev/nul
 else
     bad "sources compile without main() (library build)"
 fi
+# an embedder must see errors, not just stdout (the "no output at all" report)
+if [ -f tools/test_capture.sh ]; then
+    if bash tools/test_capture.sh >"$WORK/cap.log" 2>&1; then
+        ok "captured output includes stderr"
+    else
+        bad "captured output includes stderr"
+        sed 's/^/        /' "$WORK/cap.log" | head -8
+    fi
+fi
+
 # no JDK in every environment, so check the wrapper structurally: every
 # native must have a JNI symbol, and required args must be validated
 if python3 tools/check_java.py jni/dev/veritpath/Veritpath.java \

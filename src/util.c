@@ -424,45 +424,125 @@ void vp_report_missing(const char *role, const char *path)
 
 /* --------------------------------------------------------- output capture
  *
- * Embedders (the JNI binding, unit tests, other tools) need the command output
- * as a string instead of on stdout. Duplicate the fd onto a temp file rather
- * than reassigning the stdout FILE*, which is not portable.
+ * Embedders (the JNI binding, tests, other tools) need a command's output as a
+ * string. Two things make this harder than it looks:
+ *
+ * 1. Errors go to stderr. Capturing only stdout means a failing command returns
+ *    an empty string, which looks like "the tool produced nothing".
+ * 2. tmpfile() is unreliable outside a normal Linux desktop: Android has no
+ *    /tmp, TMPDIR is usually unset inside an app, and the current directory is
+ *    typically "/" (not writable). tmpfile() then returns NULL and every call
+ *    silently yields no output.
+ *
+ * So: search a list of candidate directories, and capture stdout *and* stderr
+ * into the same file (they share one file description, so writes interleave
+ * correctly).
  */
-static int g_saved_fd = -1;
+static int g_saved_out = -1;
+static int g_saved_err = -1;
+static int g_cap_fd = -1;
 static FILE *g_cap_file = NULL;
+static char *g_cap_dir = NULL;      /* explicit dir, set by the embedder */
+static char g_cap_why[256];
+
+void vp_capture_set_dir(const char *dir)
+{
+    free(g_cap_dir);
+    g_cap_dir = (dir && *dir) ? xstrdup(dir) : NULL;
+}
+
+const char *vp_capture_error(void)
+{
+    return g_cap_why[0] ? g_cap_why : NULL;
+}
+
+/* Returns an fd for an anonymous scratch file, or -1. */
+static int open_scratch(void)
+{
+    const char *cands[8];
+    int n = 0;
+    if (g_cap_dir)
+        cands[n++] = g_cap_dir;
+    const char *env = getenv("TMPDIR");
+    if (env && *env)
+        cands[n++] = env;
+#ifdef P_tmpdir
+    cands[n++] = P_tmpdir;
+#endif
+    cands[n++] = "/tmp";
+    cands[n++] = "/data/local/tmp";
+    cands[n++] = ".";
+
+#if defined(_WIN32) || defined(_WIN64)
+    /* mkstemp is not guaranteed on MinGW; tmpfile is fine there */
+    FILE *f = tmpfile();
+    if (!f)
+        return -1;
+    return dup(fileno(f));
+#else
+    for (int i = 0; i < n; i++) {
+        if (!cands[i] || !cands[i][0])
+            continue;
+        size_t len = strlen(cands[i]) + 32;
+        char *tpl = xmalloc(len);
+        snprintf(tpl, len, "%s/.veritpath-XXXXXX", cands[i]);
+        int fd = mkstemp(tpl);
+        if (fd >= 0) {
+            /* unlink straight away: nothing to clean up, even on a crash */
+            unlink(tpl);
+            free(tpl);
+            return fd;
+        }
+        free(tpl);
+    }
+    return -1;
+#endif
+}
 
 int vp_capture_start(void)
 {
     if (g_cap_file)
-        return -1;                      /* already capturing */
+        return -1;
     fflush(stdout);
     fflush(stderr);
-    g_cap_file = tmpfile();
-    if (!g_cap_file)
-        return -1;
-    g_saved_fd = dup(STDOUT_FILENO);
-    if (g_saved_fd < 0) {
-        fclose(g_cap_file);
-        g_cap_file = NULL;
-        return -1;
-    }
-    if (dup2(fileno(g_cap_file), STDOUT_FILENO) < 0) {
-        close(g_saved_fd);
-        g_saved_fd = -1;
-        fclose(g_cap_file);
-        g_cap_file = NULL;
+
+    g_cap_why[0] = 0;
+    int fd = open_scratch();
+    if (fd < 0) {
+        snprintf(g_cap_why, sizeof(g_cap_why),
+                 "cannot create a scratch file for output capture; "
+                 "call vp_capture_set_dir() with a writable directory");
         return -1;
     }
+    FILE *f = fdopen(fd, "w+");
+    if (!f) {
+        close(fd);
+        snprintf(g_cap_why, sizeof(g_cap_why), "cannot fdopen the scratch file");
+        return -1;
+    }
+    g_cap_fd = fd;
+    g_cap_file = f;
+    g_saved_out = dup(STDOUT_FILENO);
+    g_saved_err = dup(STDERR_FILENO);
+    /* both point at the same file description, so they share one offset */
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
     return 0;
 }
 
 char *vp_capture_stop(void)
 {
     fflush(stdout);
-    if (g_saved_fd >= 0) {
-        dup2(g_saved_fd, STDOUT_FILENO);
-        close(g_saved_fd);
-        g_saved_fd = -1;
+    fflush(stderr);
+    if (g_saved_err >= 0) {
+        dup2(g_saved_err, STDERR_FILENO);
+        close(g_saved_err);
+        g_saved_err = -1;
+    }
+    if (g_saved_out >= 0) {
+        dup2(g_saved_out, STDOUT_FILENO);
+        close(g_saved_out);
+        g_saved_out = -1;
     }
     if (!g_cap_file)
         return NULL;
@@ -486,5 +566,6 @@ char *vp_capture_stop(void)
     buf[len] = 0;
     fclose(g_cap_file);
     g_cap_file = NULL;
+    g_cap_fd = -1;
     return buf;
 }

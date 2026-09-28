@@ -79,6 +79,27 @@ public final class Veritpath {
 
     private Veritpath() {}
 
+    /**
+     * Sets the directory used for output capture.
+     *
+     * <p>Do this once at startup, before any command:
+     *
+     * <pre>{@code
+     * Veritpath.setTempDir(getCacheDir().getAbsolutePath());
+     * }</pre>
+     *
+     * <p>Without it the native side looks for a writable directory itself, and
+     * on Android there often is none: {@code /tmp} does not exist, the current
+     * directory is {@code "/"} and {@code TMPDIR} is unset. Capture then fails
+     * and every call comes back with an empty string.
+     *
+     * @param dir a directory the app can write to, e.g. {@code getCacheDir()}
+     */
+    public static void setTempDir(String dir) {
+        load();
+        nativeSetTempDir(dir);
+    }
+
     /** Loads {@code libveritpath.so}. Safe to call more than once. */
     public static synchronized void load() {
         if (loaded) return;
@@ -212,6 +233,8 @@ public final class Veritpath {
     private static native String nativeLastOutput();
 
     private static native String nativeVersion();
+
+    private static native void nativeSetTempDir(String dir);
 
     private static native void nativeFree();
 }

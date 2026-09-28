@@ -63,7 +63,11 @@ int dir_in_path(const char *dir, const char *path);
 void vp_set_program_name(const char *name);
 int vp_cli_run(int argc, char **argv);
 
-/* capture what vp_cli_run prints, as a malloc'd string */
+/* capture what vp_cli_run prints (stdout *and* stderr), as a malloc'd string.
+ * vp_capture_set_dir() picks the scratch directory; without it the caller's
+ * environment decides, which fails on Android where /tmp does not exist. */
+void vp_capture_set_dir(const char *dir);
+const char *vp_capture_error(void);
 int vp_capture_start(void);
 char *vp_capture_stop(void);
 char *replace_suffix(const char *path, const char *suffix); /* stem + suffix */

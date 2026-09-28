@@ -133,6 +133,9 @@ jobs:
 
       # Guards the exact mistake a downstream dev hit: images passed as bare
       # positionals, which the CLI silently ignored.
+      - name: Captured output includes stderr
+        run: bash tools/test_capture.sh
+
       - name: Java wrapper matches the JNI layer
         run: python3 tools/check_java.py jni/dev/veritpath/Veritpath.java jni/veritpath_jni.c
 

@@ -68,6 +68,17 @@ Then copy `jniLibs/` straight into `app/src/main/` — no CMake needed.
 
 ### 3. Call it from Java
 
+**Initialise once, in `Application.onCreate`:**
+
+```java
+Veritpath.setTempDir(getCacheDir().getAbsolutePath());
+```
+
+Without it the native side hunts for a writable directory, and on Android there
+often is none: `/tmp` does not exist, the current directory is `/`, and `TMPDIR`
+is unset. Capture then fails and every call returns an empty string. See
+troubleshooting below.
+
 ```java
 Veritpath.Result r = Veritpath.analyze(
         Veritpath.Image.initBoot(initBootPath),
@@ -209,3 +220,27 @@ Log.d("vp", String.join(" ", args));
 
 Neither parsed to a ramdisk. `analyze` lists `header_version` and
 `ramdisk_size` per image, so you can see which one came up empty.
+
+### `output` comes back empty
+
+Two causes, both fixed — but the usage matters:
+
+1. **The command failed and its errors went to stderr.** Earlier builds captured
+   only stdout, so a failure produced an empty string. stdout and stderr are now
+   captured together, so a failing command still returns its error text.
+2. **No writable directory.** The old code used `tmpfile()`, which fails on
+   Android: there is no `/tmp`, `TMPDIR` is normally unset inside an app, and the
+   current directory is `/`. Capture then failed outright.
+
+Give it a directory you know is writable:
+
+```java
+Veritpath.setTempDir(getCacheDir().getAbsolutePath());
+```
+
+The implementation now tries, in order: the directory you set → `TMPDIR` →
+`P_tmpdir` → `/tmp` → `/data/local/tmp` → the current directory. The scratch file
+is unlinked immediately after creation, so nothing is left behind.
+
+If every candidate fails, `nativeRun` no longer returns an empty string — it
+returns a message telling you to call `setTempDir()`.

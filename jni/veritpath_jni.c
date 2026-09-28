@@ -61,15 +61,22 @@ Java_dev_veritpath_Veritpath_nativeRun(JNIEnv *env, jclass cls, jobjectArray arg
 
     int rc = 1;
     if (vp_capture_start() == 0) {
+        /* stdout and stderr both land here, so a failing command still has
+         * something to report */
         rc = vp_cli_run((int)built, c_argv);
         set_last_output(vp_capture_stop());
     } else {
+        const char *why = vp_capture_error();
         rc = vp_cli_run((int)built, c_argv);
-        set_last_output(NULL);
+        /* An app cannot read logcat, so an uncaptured run looks like "no
+         * output at all". Say why instead of returning an empty string. */
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+                 "veritpath: output capture unavailable%s%s\n"
+                 "call Veritpath.setTempDir(context.getCacheDir().getAbsolutePath())\n",
+                 why ? ": " : "", why ? why : "");
+        set_last_output(xstrdup(msg));
     }
-
-    /* also surface stderr-ish errors: vp_err writes to stderr, which the app
-     * can see in logcat, so nothing extra is needed here */
 
     for (jsize i = 0; i < built; i++)
         free(c_argv[i]);
@@ -91,6 +98,21 @@ Java_dev_veritpath_Veritpath_nativeVersion(JNIEnv *env, jclass cls)
 {
     (void)cls;
     return (*env)->NewStringUTF(env, "veritpath " VP_VERSION);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_veritpath_Veritpath_nativeSetTempDir(JNIEnv *env, jclass cls, jstring dir)
+{
+    (void)cls;
+    if (!dir) {
+        vp_capture_set_dir(NULL);
+        return;
+    }
+    const char *chars = (*env)->GetStringUTFChars(env, dir, NULL);
+    if (!chars)
+        return;
+    vp_capture_set_dir(chars);
+    (*env)->ReleaseStringUTFChars(env, dir, chars);
 }
 
 JNIEXPORT void JNICALL
