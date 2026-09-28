@@ -139,6 +139,14 @@ jobs:
       - name: Java wrapper matches the JNI layer
         run: python3 tools/check_java.py jni/dev/veritpath/Veritpath.java jni/veritpath_jni.c
 
+          # the shared object is the one that breaks without -fPIC
+      - name: Library builds (static + shared)
+        run: |
+          make lib
+          make lib-shared
+          test -f build/libveritpath.a
+          test -f build/libveritpath.so
+
       - name: A bare image path still works
         run: |
           make

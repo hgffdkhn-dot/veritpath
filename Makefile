@@ -79,9 +79,13 @@ clean:
 LIB_SRCS := $(wildcard src/*.c)
 LIB_OBJS := $(patsubst src/%.c,build/lib/%.o,$(LIB_SRCS))
 
+# -fPIC is required for a shared object; it is harmless in a static archive.
+# $(DEFS) matters just as much: without HAVE_LZMA/HAVE_BZIP2/HAVE_ZSTD the
+# library silently loses those compression formats and cannot read images the
+# binary handles fine - a library that is quietly less capable than the CLI.
 build/lib/%.o: src/%.c src/vp.h
 	@mkdir -p build/lib
-	$(CC) $(CFLAGS) -DVP_NO_MAIN -c $< -o $@
+	$(CC) $(CFLAGS) $(DEFS) -fPIC -DVP_NO_MAIN -I$(SRCDIR) -D_GNU_SOURCE -c $< -o $@
 
 lib: $(LIB_OBJS)
 	@mkdir -p build
@@ -90,7 +94,7 @@ lib: $(LIB_OBJS)
 
 lib-shared: $(LIB_OBJS)
 	@mkdir -p build
-	$(CC) -shared -o build/libveritpath.so $(LIB_OBJS) $(LDLIBS)
+	$(CC) $(LDFLAGS) -shared -o build/libveritpath.so $(LIB_OBJS) $(LDLIBS)
 	@echo "  -> build/libveritpath.so"
 
 # JNI shared object for APKs; needs the real jni.h from an NDK/JDK
@@ -101,7 +105,7 @@ lib-jni: build/lib/veritpath_jni.o $(LIB_OBJS)
 
 build/lib/veritpath_jni.o: jni/veritpath_jni.c src/vp.h
 	@mkdir -p build/lib
-	$(CC) $(CFLAGS) -DVP_NO_MAIN -Isrc -I$(JNI_INCLUDE) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEFS) -fPIC -DVP_NO_MAIN -Isrc -D_GNU_SOURCE -I$(JNI_INCLUDE) -c $< -o $@
 
 jni-test:
 	bash tools/test_jni.sh

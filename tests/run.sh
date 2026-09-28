@@ -203,6 +203,49 @@ if cc -O2 -std=c11 -DVP_NO_MAIN -Isrc -c src/util.c -o "$WORK/util.o" 2>/dev/nul
 else
     bad "sources compile without main() (library build)"
 fi
+# the library builds must link: -fPIC for the shared one, and the same
+# compression DEFS as the binary or the library quietly loses formats
+if command -v cc >/dev/null 2>&1; then
+    if make lib >"$WORK/lib.log" 2>&1 && [ -f build/libveritpath.a ]; then
+        ok "static library builds"
+    else
+        bad "static library builds"
+        sed 's/^/        /' "$WORK/lib.log" | tail -5
+    fi
+    if make lib-shared >"$WORK/libso.log" 2>&1; then
+        if [ -f build/libveritpath.so ]; then
+            ok "shared library links (-fPIC applied)"
+        else
+            bad "shared library produced a .so"
+        fi
+    else
+        bad "shared library links (-fPIC applied)"
+        sed 's/^/        /' "$WORK/libso.log" | grep -E "relocation|fPIC|error" | head -5
+    fi
+    # a real link against the .so: undefined-symbol errors only show up here
+    cat > "$WORK/use.c" <<'EOF'
+#include <stdio.h>
+#include "vp.h"
+int main(void){ vp_set_program_name("veritpath");
+  char *av[1]; av[0]=(char*)"doctor"; char *o=NULL; int rc=1;
+  if(vp_capture_start()==0){ rc=vp_cli_run(1,av); o=vp_capture_stop(); }
+  printf("%d %s", rc, o ? (strstr(o,"VERSION:")?"captured":"empty") : "null");
+  return !(o && strstr(o,"VERSION:")); }
+EOF
+    if cc -O2 -std=c11 -Isrc -o "$WORK/use" "$WORK/use.c"             -Lbuild -lveritpath >>"$WORK/lib.log" 2>&1; then
+        if LD_LIBRARY_PATH=build "$WORK/use" | grep -q captured; then
+            ok "a program can link against the shared library"
+        else
+            bad "a program can link against the shared library (output)"
+        fi
+    else
+        bad "a program can link against the shared library"
+        sed 's/^/        /' "$WORK/lib.log" | tail -4
+    fi
+    rm -f build/libveritpath.a build/libveritpath.so
+    rm -rf build/lib
+fi
+
 # an embedder must see errors, not just stdout (the "no output at all" report)
 if [ -f tools/test_capture.sh ]; then
     if bash tools/test_capture.sh >"$WORK/cap.log" 2>&1; then
