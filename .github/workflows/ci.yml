@@ -44,7 +44,12 @@ jobs:
       - name: Install cross toolchains
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+          # the compiler is not enough: the link needs a zlib built for the
+          # target, otherwise it dies with "cannot find -lz"
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu zlib1g-dev:arm64 \
+                                      gcc-mingw-w64-x86-64 libz-mingw-w64-dev
 
       - name: Cross-compile (missing toolchains are skipped, not fatal)
         run: |

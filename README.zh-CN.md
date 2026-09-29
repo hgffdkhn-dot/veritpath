@@ -222,6 +222,31 @@ veritpath inject --boot boot.img -p my-su --create-ramdisk -o out/
 必须在 payload 里提供真正的静态 init（`{"src": "init", "dest": "/init"}`），
 否则开不了机。详见 [docs/DEVELOPERS.md](docs/DEVELOPERS.md) 第十节。
 
+### 交叉编译时 `cannot find -lz`
+
+交叉编译器装好了并不代表目标的 zlib 也装好了，链接时会报 `cannot find -lz`。
+
+```bash
+# aarch64
+sudo dpkg --add-architecture arm64
+sudo apt-get update && sudo apt-get install zlib1g-dev:arm64
+
+# 32 位 x86
+sudo apt-get install zlib1g-dev:i386
+
+# Windows (mingw)
+sudo apt-get install libz-mingw-w64-dev
+```
+
+手上若有为目标架构编好的 zlib，直接指过去：
+
+```bash
+ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
+```
+
+`build.sh` 会在编译前先测一次 `-lz`，失败就打印上面的命令而不是甩一个裸的 ld
+错误。用 `all` 时缺依赖的目标会被跳过；明确指定单个目标时才会失败退出。
+
 ### 输出比输入小很多
 
 不是数据丢失。`dd` 整个分区（`/dev/block/by-name/boot_a`）会把真实镜像之后的 0

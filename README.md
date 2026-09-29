@@ -216,6 +216,33 @@ If none of those apply, force a version and see:
 veritpath analyze --boot boot.img --header-version 3
 ```
 
+### `cannot find -lz` while cross-compiling
+
+A cross compiler being installed says nothing about the target's zlib; the link
+then dies with `cannot find -lz`.
+
+```bash
+# aarch64
+sudo dpkg --add-architecture arm64
+sudo apt-get update && sudo apt-get install zlib1g-dev:arm64
+
+# 32-bit x86
+sudo apt-get install zlib1g-dev:i386
+
+# Windows (mingw)
+sudo apt-get install libz-mingw-w64-dev
+```
+
+Or point at a zlib built for the target:
+
+```bash
+ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
+```
+
+`build.sh` probes `-lz` before compiling and prints the commands above instead
+of a bare linker error. Missing dependencies are skipped under `all`; an
+explicitly requested target fails instead.
+
 ### `TLS segment is underaligned` on Android
 
 Bionic requires `PT_TLS` alignment >= 64 while a static NDK link emits 8, and

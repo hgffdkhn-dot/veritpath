@@ -18,7 +18,9 @@ jobs:
       - name: Static Linux binaries
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu zlib1g-dev:arm64
           mkdir -p dist
           cc -O2 -std=c11 -Wall -Wextra -Isrc src/*.c -lz -static \
              -o dist/veritpath-linux-x86_64
@@ -43,7 +45,7 @@ jobs:
       - name: Cross-compile with mingw-w64
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 libz-mingw-w64-dev
           mkdir -p dist
           x86_64-w64-mingw32-gcc -O2 -std=c11 -Isrc src/*.c -lz -static \
              -o dist/veritpath-windows-x86_64.exe
