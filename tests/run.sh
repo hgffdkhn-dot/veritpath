@@ -203,6 +203,35 @@ if cc -O2 -std=c11 -DVP_NO_MAIN -Isrc -c src/util.c -o "$WORK/util.o" 2>/dev/nul
 else
     bad "sources compile without main() (library build)"
 fi
+# cross builds must skip cleanly when the target has no zlib, instead of
+# dying with a bare "cannot find -lz"
+if [ -f tools/ensure_zlib.sh ]; then
+    FAKE=$(mktemp -d)
+    printf '#!/bin/sh\nexit 1\n' > "$FAKE/aarch64-linux-gnu-gcc"
+    chmod 755 "$FAKE/aarch64-linux-gnu-gcc"
+    if PATH="$FAKE:$PATH" VP_SKIP_MISSING=1 VP_NO_AUTO_ZLIB=1 \
+            bash build.sh linux-aarch64 >"$WORK/x.log" 2>&1; then
+        ok "a target without zlib is skipped, not fatal"
+    else
+        bad "a target without zlib is skipped, not fatal"
+        sed 's/^/        /' "$WORK/x.log" | tail -4
+    fi
+    # and the hint must name the package to install
+    if grep -q "zlib1g-dev:arm64" "$WORK/x.log"; then
+        ok "the hint names the missing package"
+    else
+        bad "the hint names the missing package"
+    fi
+    # 'all' must keep going past a skipped target
+    if PATH="$FAKE:$PATH" VP_NO_AUTO_ZLIB=1 bash build.sh all >"$WORK/y.log" 2>&1; then
+        ok "'all' survives a skipped target"
+    else
+        bad "'all' survives a skipped target"
+        sed 's/^/        /' "$WORK/y.log" | tail -4
+    fi
+    rm -rf "$FAKE"
+fi
+
 # the library builds must link: -fPIC for the shared one, and the same
 # compression DEFS as the binary or the library quietly loses formats
 if command -v cc >/dev/null 2>&1; then

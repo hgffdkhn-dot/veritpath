@@ -6,6 +6,10 @@
 #   ./build.sh windows-x86_64  # needs mingw-w64
 #   ./build.sh all             # everything the local toolchains allow
 #
+# zlib is the only hard dependency. If the target's zlib is missing the script
+# tries to install it (multi-arch) and then builds it from source; set
+# ZLIB_DIR to point at one, or VP_NO_AUTO_ZLIB=1 to disable that entirely.
+#
 # Targets that have no toolchain installed are skipped with a hint, so the
 # script never fails just because a cross compiler is missing.
 set -euo pipefail
@@ -29,17 +33,30 @@ if [ -n "${ZLIB_DIR:-}" ]; then
     LIBS="-L$ZLIB_DIR $LIBS"
 fi
 
-can_link_z() {          # compiler, extra-flags
-    local cc="$1" extra="$2"
+can_link_z() {          # compiler, extra-flags, libs
+    local cc="$1" extra="$2" libs="$3"
     local tmp; tmp=$(mktemp -d)
     printf 'int main(void){return 0;}\n' > "$tmp/t.c"
     # shellcheck disable=SC2086
-    if $cc $extra $LIBS "$tmp/t.c" -o "$tmp/t" >"$tmp/log" 2>&1; then
+    if $cc $extra "$tmp/t.c" -o "$tmp/t" $libs >"$tmp/log" 2>&1; then
         rm -rf "$tmp"
         return 0
     fi
     rm -rf "$tmp"
     return 1
+}
+
+# Last resort: arrange a zlib for this target ourselves (apt multi-arch, then
+# build it from source). Prints the libz.a path, or nothing.
+provision_zlib() {      # compiler, extra-flags
+    local cc="$1" extra="$2" out=""
+    [ -n "${VP_NO_AUTO_ZLIB:-}" ] && return 1
+    [ -f "$ROOT/tools/ensure_zlib.sh" ] || return 1
+    out=$(bash "$ROOT/tools/ensure_zlib.sh" "$cc" "$extra" 2>/dev/null | tail -1) || return 1
+    case "$out" in
+        /*) printf '%s\n' "$out"; return 0 ;;
+        *)  return 1 ;;
+    esac
 }
 
 zlib_hint() {           # compiler
@@ -70,7 +87,20 @@ build_one() {           # name, compiler, extra-flags, suffix
         echo "  skip  $name (no ${cc%% *})"
         return 0
     fi
-    if ! can_link_z "$cc" "$extra"; then
+    local libs="$LIBS"
+    if ! can_link_z "$cc" "$extra" "$libs"; then
+        echo "  $name: no zlib for this target yet, trying to arrange one"
+        local z=""
+        z=$(provision_zlib "$cc" "$extra") || z=""
+        if [ -n "$z" ] && [ -f "$z" ]; then
+            # link the archive directly: no -L guessing, no -l resolution
+            libs="$z"
+            echo "        using $z"
+        elif [ -n "$z" ]; then
+            libs="$LIBS"
+        fi
+    fi
+    if ! can_link_z "$cc" "$extra" "$libs"; then
         echo "  skip  $name (no zlib for this target)"
         zlib_hint "$cc"
         if [ -n "${VP_SKIP_MISSING:-}" ]; then
@@ -84,13 +114,21 @@ build_one() {           # name, compiler, extra-flags, suffix
     fi
     echo "  build $name"
     # shellcheck disable=SC2086
-    $cc $CC_BASE $extra "${SRCS[@]}" $LIBS -o "$OUT/veritpath-$name$suffix" 2>&1 | sed 's/^/        /'
+    $cc $CC_BASE $extra "${SRCS[@]}" $libs -o "$OUT/veritpath-$name$suffix" 2>&1 | sed 's/^/        /'
     file "$OUT/veritpath-$name$suffix" 2>/dev/null | sed 's/^/        /' || true
 }
 
 build_android() {
     # the android script already knows how to find, install or fall back
-    bash "$ROOT/build-android.sh" "${1:-all}"
+    if ! bash "$ROOT/build-android.sh" "${1:-all}"; then
+        # a missing NDK is the same class of problem as a missing cross
+        # compiler: skip it under 'all', fail when asked for it by name
+        if [ -n "${VP_SKIP_MISSING:-}" ] || [ "${VP_TARGET_EXPLICIT:-1}" != "1" ]; then
+            echo "  skip  android (no NDK)"
+            return 0
+        fi
+        return 1
+    fi
 }
 
 target="${1:-native}"

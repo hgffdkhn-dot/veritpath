@@ -244,6 +244,30 @@ sudo apt-get install libz-mingw-w64-dev
 ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
 ```
 
+如果 apt 也装不上（arm64 索引在某些 runner 上 404），`build.sh` 会自动**从源码为
+交叉目标编一份 zlib**，缓存到 `~/.cache/veritpath-zlib/`。也可手动指定：
+
+```bash
+ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
+VP_NO_AUTO_ZLIB=1 ./build.sh linux-aarch64   # 关闭自动准备
+```
+
+`apt-get update` 返回非 0（foreign 架构索引 404 时常见）不会再中断流程——装不上
+就源码编译，都不行就跳过该目标。
+
+
+
+如果 apt 也装不上（arm64 索引在某些 runner 上 404），`build.sh` 会自动**从源码为
+交叉目标编一份 zlib**，缓存到 `~/.cache/veritpath-zlib/`。也可手动指定：
+
+```bash
+ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
+VP_NO_AUTO_ZLIB=1 ./build.sh linux-aarch64   # 关闭自动准备
+```
+
+`apt-get update` 返回非 0（foreign 架构索引 404 时常见）不会再中断流程——装不上
+就源码编译，都不行就跳过该目标。
+
 `build.sh` 会在编译前先测一次 `-lz`，失败就打印上面的命令而不是甩一个裸的 ld
 错误。用 `all` 时缺依赖的目标会被跳过；明确指定单个目标时才会失败退出。
 

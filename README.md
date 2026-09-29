@@ -239,6 +239,32 @@ Or point at a zlib built for the target:
 ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
 ```
 
+If apt cannot install it either (arm64 indexes 404 on some runners), `build.sh`
+builds zlib from source for the cross target and caches it under
+`~/.cache/veritpath-zlib/`:
+
+```bash
+ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
+VP_NO_AUTO_ZLIB=1 ./build.sh linux-aarch64   # disable the auto provisioning
+```
+
+A non-zero `apt-get update` (a foreign-architecture index that 404s) no longer
+aborts the run: it falls back to building zlib, and skips the target if that
+fails too.
+
+
+
+如果 apt 也装不上（arm64 的索引在某些 runner 上 404），`build.sh` 会自动**从源码
+为交叉目标编一份 zlib**，产物缓存在 `~/.cache/veritpath-zlib/`。也可以手动指定：
+
+```bash
+ZLIB_DIR=/path/to/sysroot/lib ./build.sh linux-aarch64
+VP_NO_AUTO_ZLIB=1 ./build.sh linux-aarch64   # 关掉自动准备
+```
+
+`apt-get update` 返回非 0（比如 foreign 架构的索引 404）不会再中断整个流程——
+装不上就走源码编译，实在不行跳过该目标。
+
 `build.sh` probes `-lz` before compiling and prints the commands above instead
 of a bare linker error. Missing dependencies are skipped under `all`; an
 explicitly requested target fails instead.

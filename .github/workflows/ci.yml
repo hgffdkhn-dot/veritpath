@@ -41,20 +41,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cross toolchains
-        run: |
-          sudo apt-get update -qq
-          # the compiler is not enough: the link needs a zlib built for the
-          # target, otherwise it dies with "cannot find -lz"
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu zlib1g-dev:arm64 \
-                                      gcc-mingw-w64-x86-64 libz-mingw-w64-dev
-
+      # apt-get update is tolerated: adding a foreign architecture makes apt
+      # fetch indexes (security.ubuntu.com has no binary-arm64 everywhere) and
+      # a non-zero update would fail the job for no good reason.
       - name: Cross-compile (missing toolchains are skipped, not fatal)
         run: |
-          bash build.sh linux-aarch64
-          bash build.sh windows-x86_64
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 || true
+          # A compiler is not enough: the link needs a zlib for the target.
+          # build.sh installs one (multi-arch) or builds it from source, and
+          # skips the target instead of failing when neither is possible.
+          VP_SKIP_MISSING=1 bash build.sh linux-aarch64
+          VP_SKIP_MISSING=1 bash build.sh windows-x86_64
 
       - name: Regression suite against the native binary
         run: |
