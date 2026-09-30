@@ -120,6 +120,26 @@ int main(void)
         (void)o;
     }
 
+    /* 8. argv[0] must be the sub-command. A caller that puts the image flags
+     * first (the old Java wrapper did) has to get a clear error, not a silent
+     * mis-dispatch to another command. */
+    {
+        char *v[4];
+        v[0] = (char*)"--init-boot"; v[1] = (char*)"/path";
+        v[2] = (char*)"inject";      v[3] = NULL;
+        char *o = NULL;
+        int rc8 = run(v, 3, &o);
+        /* vp_cli_run takes argv[0] as the command, so this must fail loudly */
+        if (rc8 == 0) {
+            printf("    FAIL: a flag-first argv was accepted\n"); bad = 1;
+        } else if (!o || !*o) {
+            printf("    FAIL: flag-first argv gave no message\n"); bad = 1;
+        } else {
+            printf("    ok: flag-first argv is rejected with a message\n");
+        }
+        free(o);
+    }
+
     printf(bad ? "  FAILED\n" : "  PASS\n");
     return bad;
 }

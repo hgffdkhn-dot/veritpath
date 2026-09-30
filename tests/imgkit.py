@@ -210,6 +210,46 @@ def verify_frags(path):
     return True
 
 
+def cmd_evil(d):
+    """Images and payloads crafted to write outside the destination."""
+    import struct as _s
+    os.makedirs(d, exist_ok=True)
+
+    def entry(name, data, mode=0o644):
+        n = name.encode() + b"\0"
+        def h(v, w=8):
+            return ("%0*X" % (w, v)).encode()
+        out = b"070701"
+        for v in (0x1, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(n), 0):
+            out += h(v)
+        out += n
+        out += b"\0" * ((4 - len(out) % 4) % 4)
+        out += data
+        out += b"\0" * ((4 - len(out) % 4) % 4)
+        return out
+
+    cpio = (entry("../../../../../../veritpath_escape_test", b"pwned\n")
+            + entry("TRAILER!!!", b""))
+    img = boot_v3v4(KERNEL, cpio, 4)
+    open(d + "/traversal.img", "wb").write(img)
+
+    # a symlink planted first, then a file of the same name: the write must
+    # not follow the link out of the tree
+    cpio2 = (entry("pwn", b"/veritpath_symlink_pwn\n", 0o120777)
+             + entry("pwn", b"should not follow the link\n", 0o644)
+             + entry("TRAILER!!!", b""))
+    open(d + "/symlink_escape.img", "wb").write(boot_v3v4(KERNEL, cpio2, 4))
+
+    pay = os.path.join(d, "evilpayload")
+    os.makedirs(pay, exist_ok=True)
+    open(pay + "/payload.bin", "wb").write(b"x")
+    open(pay + "/manifest.json", "w").write(
+        '{"name":"evil","arch":["arm64"],"files":'
+        '[{"src":"payload.bin","dest":"/../../../veritpath_escape_pay",'
+        '"mode":"0755"}]}')
+    print("  built traversal.img and a traversal payload")
+
+
 def cmd_partition(d):
     """A whole-partition dd: real image followed by zeros up to the partition
     size. Repacking drops the padding, which looks like data loss unless the
@@ -377,6 +417,10 @@ def main():
         verify_frags(arg)
     elif cmd == "partition":
         cmd_partition(arg)
+    elif cmd == "evil":
+        cmd_evil(arg)
+    elif cmd == "evil":
+        cmd_evil(arg)
     else:
         print(__doc__)
         return 2

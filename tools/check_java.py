@@ -65,6 +65,20 @@ def main():
     if re.search(r'System\.arraycopy\(images, 0, full, 1', java):
         return fail("images are still copied as raw positionals")
     print("images carry their own flags")
+    # the sub-command must be argv[0]: an earlier revision passed the image
+    # flags first and every call failed with "unknown command: --init-boot"
+    # (?<!String\[\] ) skips the declaration itself
+    for m in re.finditer(r'(?<!String\[\] )concat\(\s*([A-Za-z_][A-Za-z0-9_]*)', java):
+        first = m.group(1)
+        if first not in ("head",):
+            return fail("concat() must take the command head first, got '%s' - "
+                        "argv[0] has to be the sub-command" % first)
+    print("concat() puts the sub-command first")
+
+    if 'analyze' in java and not re.search(r'"analyze"\s*,\s*"--brief"', java):
+        return fail('analyze() should build its head as {"analyze", "--brief"}')
+    print("analyze/inject heads look right")
+
     print("OK")
     return 0
 

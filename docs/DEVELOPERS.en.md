@@ -186,6 +186,44 @@ image was already patched and warns on a second injection (override with
   `init_boot.img` carries no kernel, so arch cannot be determined from it alone
   — pass `boot.img` as well.
 
+
+## Untrusted input
+
+veritpath exists to analyse images **other people** supply and to inject
+payloads **other people** write, so both are treated as untrusted.
+
+**Path traversal (zip-slip).** A ramdisk entry may be named
+`../../../../tmp/x`, which would escape the work directory on extraction. Any
+entry containing a `..` component is refused and reported:
+
+```
+! refusing an entry that escapes the output directory: ../../../../../../tmp/x
+```
+
+A payload manifest's `dest` is subject to the same rule and is rejected at load
+time.
+
+**Symlink following.** Plant a symlink pointing outside, then an entry with the
+same name: `fopen()` would follow the link and write outside the tree. The path
+is unlinked before writing.
+
+The symlink **target** itself is unrestricted — `/init -> /system/bin/init` is an
+absolute path and perfectly normal in an Android ramdisk.
+
+## Option validation
+
+Numeric options no longer swallow bad input silently:
+
+| Input | Old behaviour | Now |
+|---|---|---|
+| `--header-version xyz` | silently 0, printed `HEADER_VER:0` (wrong, exit 0) | error, exit 1 |
+| `--segment abc` | silently 0 | error, exit 1 |
+| `--segment 99` (out of range) | silently clamped to the last segment | reports the real count, exit 1 |
+| `--format nosuchfmt` | silently raw | error listing the valid names |
+
+Which `--format` values exist depends on the compression backends compiled in;
+the error message lists them as built.
+
 ## 9. Remember `./` in scripts
 
 **On many Android devices a bare `veritpath` is not found** — the current

@@ -104,10 +104,21 @@ public final class Veritpath {
 
     /**
      * Runs a command. The arguments are exactly what you would type after
-     * {@code veritpath} on a shell, one String per token.
+     * {@code veritpath} on a shell, one String per token, <b>so the
+     * sub-command has to be {@code args[0]}</b>.
+     *
+     * <pre>{@code
+     * Veritpath.run("analyze", "--brief", "--boot", bootPath);   // correct
+     * Veritpath.run("--boot", bootPath, "analyze");              // rejected
+     * }</pre>
      */
     public static Result run(String... args) {
         load();
+        if (args != null && args.length > 0 && args[0] != null && args[0].startsWith("-")) {
+            throw new IllegalArgumentException(
+                "the sub-command must be args[0], got '" + args[0] + "' - "
+                + "write Veritpath.run("analyze", "--boot", path)");
+        }
         int code = nativeRun(args);
         return new Result(code, nativeLastOutput());
     }
@@ -120,7 +131,7 @@ public final class Veritpath {
         if (images == null || images.length == 0)
             throw new IllegalArgumentException("at least one image is required");
         String[] head = {"analyze", "--brief"};
-        return run(concat(withFlags(images), head, null));
+        return run(concat(head, withFlags(images), null));
     }
 
     /** Analyse and get structured JSON instead of the text report. */
@@ -128,7 +139,7 @@ public final class Veritpath {
         if (images == null || images.length == 0)
             throw new IllegalArgumentException("at least one image is required");
         String[] head = {"analyze", "--json"};
-        return run(concat(withFlags(images), head, null)).output;
+        return run(concat(head, withFlags(images), null)).output;
     }
 
     /**
@@ -157,7 +168,7 @@ public final class Veritpath {
         if (payloadDir == null) throw new IllegalArgumentException("payloadDir is required");
         if (outputPath == null) throw new IllegalArgumentException("outputPath is required");
         String[] head = {"inject", "-p", payloadDir, "-o", outputPath};
-        return run(concat(withFlags(image), head, extraArgs));
+        return run(concat(head, withFlags(image), extraArgs));
     }
 
     /** Inject into several images at once (e.g. boot + init_boot). */
@@ -168,7 +179,7 @@ public final class Veritpath {
         if (payloadDir == null) throw new IllegalArgumentException("payloadDir is required");
         if (outputPath == null) throw new IllegalArgumentException("outputPath is required");
         String[] head = {"inject", "-p", payloadDir, "-o", outputPath};
-        return run(concat(withFlags(images), head, extraArgs));
+        return run(concat(head, withFlags(images), extraArgs));
     }
 
     /**
@@ -213,6 +224,16 @@ public final class Veritpath {
         return out;
     }
 
+    /**
+     * Concatenates argument arrays.
+     *
+     * <p><b>Order is the whole contract here:</b> {@code vp_cli_run} takes
+     * {@code argv[0]} as the sub-command, so the sub-command must come first.
+     * An earlier revision passed the image flags first and produced
+     * {@code ["--init-boot", path, "inject", ...]}, which the CLI rejected with
+     * {@code unknown command: --init-boot} and exit 1. Every call site must
+     * pass the command head as {@code first}.
+     */
     private static String[] concat(String[] first, String[] second, String[] third) {
         int n = first.length + second.length + (third == null ? 0 : third.length);
         String[] out = new String[n];

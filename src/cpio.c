@@ -9,6 +9,7 @@
 #endif
 
 /* cpio "newc" archives, with Android multi-segment support. */
+#include "compat.h"
 #include "vp.h"
 
 #include <dirent.h>
@@ -40,6 +41,7 @@ static int vp_stat(const char *path, struct stat *st)
 #ifdef _WIN32
 static int vp_is_link(const char *full)
 {
+    (void)full;
     return 0; /* Windows unpack never sees real symlinks in a ramdisk */
 }
 static int vp_compat_symlink(const char *target, const char *linkpath)
@@ -127,6 +129,7 @@ static void put_hex32(uint8_t *p, uint32_t v)
 }
 
 /* strip leading "./" and "/" */
+/* Entry names are attacker-controlled (see vp_path_is_safe in util.c). */
 static const char *norm_name(const char *n)
 {
     while (n[0] == '.' && n[1] == '/')
@@ -471,7 +474,13 @@ int cpio_extract_dir(cpio_archive_t *a, const char *root)
         free(label);
         for (size_t j = 0; j < s->n; j++) {
             cpio_entry_t *e = &s->entries[j];
-            char *target = path_join(base, norm_name(e->name));
+            const char *rel = norm_name(e->name);
+            if (!vp_path_is_safe(rel)) {
+                vp_warn("refusing an entry that escapes the output directory: "
+                        "%s", e->name);
+                continue;
+            }
+            char *target = path_join(base, rel);
             char *parent = xstrdup(target);
             char *slash = strrchr(parent, '/');
             if (slash) {
@@ -480,12 +489,25 @@ int cpio_extract_dir(cpio_archive_t *a, const char *root)
             }
             free(parent);
             if (CPIO_IS_DIR(e)) {
+                /* do not let a symlink planted by an earlier entry redirect
+                 * this directory outside the tree */
+                if (vp_is_link(target))
+                    unlink(target);
                 mkdir_p(target);
             } else if (CPIO_IS_LINK(e)) {
+                /* A symlink target is just a string and absolute targets are
+                 * normal in an Android ramdisk (/init -> /system/bin/init), so
+                 * they are allowed. What must not happen is a later entry
+                 * being written *through* a symlink, which is handled below
+                 * by unlinking the path before writing. */
                 unlink(target);
-                if (vp_compat_symlink((const char *)e->data.data, target) != 0)
+                const char *lt = (const char *)e->data.data;
+                if (vp_compat_symlink(lt, target) != 0)
                     vp_warn("cannot create symlink %s", target);
             } else {
+                /* same reason: fopen() follows a symlink, so drop one first */
+                if (vp_is_link(target))
+                    unlink(target);
                 FILE *of = fopen(target, "wb");
                 if (of) {
                     if (e->data.len)

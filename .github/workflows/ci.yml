@@ -136,6 +136,12 @@ jobs:
 
       # Guards the exact mistake a downstream dev hit: images passed as bare
       # positionals, which the CLI silently ignored.
+      - name: Windows branch compiles
+        run: bash tools/check_windows.sh
+
+      - name: Windows branch compiles
+        run: bash tools/check_windows.sh
+
       - name: Captured output includes stderr
         run: bash tools/test_capture.sh
 

@@ -9,6 +9,7 @@
 #endif
 
 /* Android boot image headers v0..v4 and vendor_boot v3..v4. */
+#include "compat.h"
 #include "vp.h"
 
 #include <stdlib.h>

@@ -9,8 +9,10 @@
 #endif
 
 /* veritpath command line interface. */
+#include "compat.h"
 #include "vp.h"
 
+#include <errno.h>
 #include <stddef.h>
 #include <getopt.h>
 #include <stdlib.h>
@@ -55,7 +57,7 @@ static void usage(void)
     puts("      --keep-trailing  carry any bytes after the image into the output");
     puts("      --json           machine readable output");
     puts("  -b, --brief          compact KEY:VALUE output (magiskboot style)");
-    puts("      --header-version N  force a header version (0-4, diagnostics)");
+    puts("  -v, --verbose        explain what is being done");
     puts("");
     puts("examples:");
     puts("  veritpath analyze --boot boot.img --init-boot init_boot.img");
@@ -103,11 +105,50 @@ typedef struct {
     options_t opts;
     int json;
     int brief;
+    int bad_option;             /* a numeric option did not parse */
 } args_t;
 
 /* usage() must not exit: an embedder calling us with "-h" would otherwise take
  * its whole process down. */
 static int g_help_shown = 0;
+
+/* Numeric options used to go through atoi(), which turns "abc" into 0 and
+ * "12xyz" into 12 without complaint. --header-version xyz therefore produced a
+ * confident HEADER_VER:0 report - wrong output, exit 0, no warning at all.
+ * These report the bad value and leave the option unset. */
+static int parse_uint(const char *opt, const char *val, int *out)
+{
+    if (!val || !*val) {
+        vp_err("%s: needs a number", opt);
+        return -1;
+    }
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(val, &end, 10);
+    if (errno || !end || *end || v < 0 || v > 1000000) {
+        vp_err("%s: '%s' is not a non-negative number", opt, val);
+        return -1;
+    }
+    *out = (int)v;
+    return 0;
+}
+
+static int parse_int(const char *opt, const char *val, int *out)
+{
+    if (!val || !*val) {
+        vp_err("%s: needs a number", opt);
+        return -1;
+    }
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(val, &end, 10);
+    if (errno || !end || *end || v < -1000000 || v > 1000000) {
+        vp_err("%s: '%s' is not a number", opt, val);
+        return -1;
+    }
+    *out = (int)v;
+    return 0;
+}
 
 static void parse_args(int argc, char **argv, args_t *a)
 {
@@ -129,8 +170,24 @@ static void parse_args(int argc, char **argv, args_t *a)
         case 'P': a->opts.patch_vendor_boot = 1; break;
         case 'S': a->opts.permissive = 1; break;
         case 'c': a->opts.cmdline = optarg; break;
-        case 'g': a->opts.segment = atoi(optarg); break;
-        case 'F': a->opts.ramdisk_format = comp_from_name(optarg); break;
+        case 'g':
+            if (parse_int("--segment", optarg, &a->opts.segment) != 0)
+                a->bad_option = 1;
+            break;
+        case 'F': {
+            /* int, not comp_fmt_t: the enum's underlying type is unsigned on
+             * most compilers, so (comp_fmt_t)-1 < 0 is always false and an
+             * unknown name would slip through as FMT_RAW */
+            int f = (int)comp_from_name(optarg);
+            if (f < 0) {
+                vp_err("--format: unknown compression '%s'", optarg);
+                vp_err("known: %s", comp_known_names());
+                a->bad_option = 1;
+            } else {
+                a->opts.ramdisk_format = (comp_fmt_t)f;
+            }
+            break;
+        }
         case 'f': a->opts.force = 1; break;
         case 'n': a->opts.no_backup = 1; break;
         case 'D': a->opts.dry_run = 1; break;
@@ -139,7 +196,18 @@ static void parse_args(int argc, char **argv, args_t *a)
         case 'j': a->json = 1; break;
         case 'b': a->brief = 1; break;
         case 'v': vp_set_verbose(1); break;
-        case 'H': vp_forced_header_version = atoi(optarg); break;
+        case 'H': {
+            int v = 0;
+            if (parse_uint("--header-version", optarg, &v) != 0)
+                a->bad_option = 1;
+            else if (v > 6) {
+                vp_err("--header-version: %d is out of range (0-6)", v);
+                a->bad_option = 1;
+            } else {
+                vp_forced_header_version = v;
+            }
+            break;
+        }
         case 'h': usage(); g_help_shown = 1; break;
         default: break;
         }
@@ -503,7 +571,8 @@ static int cmd_verify(args_t *a)
                 for (int i = 0; i < p.rc.n_import; i++) {
                     cpio_entry_t *e = cpio_find(&arc, p.rc.import_into[i]);
                     int hooked = e && e->data.len &&
-                                 memmem(e->data.data, e->data.len, "import ", 7);
+                                 vp_memmem(e->data.data, e->data.len,
+                                           "import ", 7) != NULL;
                     printf("  %-28s %s\n", p.rc.import_into[i],
                            hooked ? "hooks the rc" : "NOT HOOKED");
                     if (!hooked)
@@ -714,14 +783,35 @@ static int cmd_inject(args_t *a)
                 continue;
             }
         }
-        size_t seg = a->opts.segment >= 0 ? (size_t)a->opts.segment : cpio_main_segment(&arc);
-        if (seg >= arc.n)
-            seg = arc.n - 1;
+        /* an out-of-range --segment used to be clamped to the last segment in
+         * silence, so "--segment 99" quietly patched segment 1. And with
+         * arc.n == 0 the clamp underflowed. Report it instead. */
+        size_t seg;
+        if (a->opts.segment >= 0) {
+            if ((size_t)a->opts.segment >= arc.n) {
+                vp_err("%s: --segment %d is out of range (this ramdisk has %zu "
+                       "segment%s)", targets[t], a->opts.segment, arc.n,
+                       arc.n == 1 ? "" : "s");
+                cpio_free(&arc);
+                continue;
+            }
+            seg = (size_t)a->opts.segment;
+        } else {
+            if (arc.n == 0) {
+                vp_err("%s: ramdisk has no segments", targets[t]);
+                cpio_free(&arc);
+                continue;
+            }
+            seg = cpio_main_segment(&arc);
+        }
 
         inject_result_t r;
         memset(&r, 0, sizeof(r));
         /* vendor_boot: every fragment needs the payload */
         if (img->is_vendor && arc.n > 1) {
+            if (a->opts.segment >= 0)
+                vp_log("vendor_boot: every fragment is patched, --segment "
+                       "%d applies to none of them", a->opts.segment);
             for (size_t s = 0; s < arc.n; s++)
                 payload_apply(&arc, s, &p, &r, a->opts.permissive, a->opts.cmdline);
         } else {
@@ -1131,6 +1221,7 @@ int vp_cli_run(int argc, char **argv)
         return 1;
     }
     const char *cmd = argv[0];
+    /* --help / --version are legitimate whole-command invocations */
     if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0 ||
         strcmp(cmd, "help") == 0) {
         usage();
@@ -1140,12 +1231,23 @@ int vp_cli_run(int argc, char **argv)
         printf("veritpath %s\n", VP_VERSION);
         return 0;
     }
+    /* argv[0] is the sub-command, so any other leading '-' means the caller
+     * put the flags first. getopt would happily permute that into running some
+     * other command entirely - which is how "analyze" silently became
+     * "unpack". Refuse, and say what went wrong. */
+    if (cmd[0] == '-') {
+        vp_err("argv[0] must be the sub-command, got '%s'", cmd);
+        vp_err("put the command first, e.g. veritpath analyze --boot boot.img");
+        return 1;
+    }
     args_t a;
     /* parse_args() skips argv[0] the way getopt expects a program name, and
      * here argv[0] is the sub-command - so hand it the array as-is. */
     parse_args(argc, argv, &a);
     if (g_help_shown)
         return 0;
+    if (a.bad_option)
+        return 1;
     if (strcmp(cmd, "hexdump") == 0)
         return cmd_hexdump(&a);
     if (strcmp(cmd, "doctor") == 0) {

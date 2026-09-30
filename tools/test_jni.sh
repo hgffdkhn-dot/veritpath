@@ -77,6 +77,21 @@ int main(int argc, char **argv)
     }
     printf("  error    : visible to the caller (%zu bytes)\n", strlen(err));
 
+    /* argv[0] is the sub-command: an argv built flag-first must be rejected
+     * with a message, not silently dispatched elsewhere */
+    {
+        const char *wrong[3];
+        wrong[0] = "--init-boot"; wrong[1] = "/path"; wrong[2] = "inject";
+        fake_arr w = { wrong, 3 };
+        jint rcw = Java_dev_veritpath_Veritpath_nativeRun(env, NULL, (jobjectArray)&w);
+        const char *ow = (const char *)Java_dev_veritpath_Veritpath_nativeLastOutput(env, NULL);
+        if (rcw == 0 || !ow || !strstr(ow, "sub-command")) {
+            printf("FAIL: flag-first argv not diagnosed\n");
+            return 1;
+        }
+        printf("  argv     : flag-first is diagnosed\n");
+    }
+
     /* with an explicit temp dir, capture must not depend on /tmp existing */
     {
         jstring d = (jstring)"/tmp";

@@ -211,3 +211,34 @@ Log.d("vp", String.join(" ", args));
 写端设为非阻塞，所以单线程调用也不会死锁。
 
 `setTempDir()` 现在只是给不支持 `pipe()` 的平台兜底，正常情况不用调。
+
+### `unknown command: --init-boot`
+
+调用 `Veritpath.analyze()` / `Veritpath.inject()` 返回退出码 1，输出
+`unknown command: --init-boot`。
+
+**原因**：`vp_cli_run` 把 `argv[0]` 当作子命令。早期版本的 Java 封装把镜像 flag
+排在了前面，拼出的是：
+
+```
+["--init-boot", "/path", "inject", "-p", payload, "-o", out]
+```
+
+于是 `--init-boot` 被当成子命令，直接失败。
+
+**已修**：所有调用点改成命令在前（0.2.0 起）。现在的顺序是：
+
+```
+["inject", "-p", payload, "-o", out, "--init-boot", "/path"]
+```
+
+自己拼 argv 时记住一条：**子命令必须是 `args[0]`**。
+
+```java
+Veritpath.run("analyze", "--brief", "--boot", bootPath);   // 对
+Veritpath.run("--boot", bootPath, "analyze");              // 错，会抛异常
+```
+
+三层都有防护：Java 侧 `run()` 直接抛 `IllegalArgumentException`；JNI 侧返回一句
+说明而不是静默跑成别的命令；C 侧 `vp_cli_run` 拒绝以 `-` 开头的 `argv[0]`（以前
+getopt 会把它 permute 成另一个命令，比如 analyze 悄悄变成 unpack）。

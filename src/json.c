@@ -9,6 +9,7 @@
 #endif
 
 /* Minimal JSON reader - just enough for veritpath manifests. */
+#include "compat.h"
 #include "vp.h"
 
 #include <ctype.h>

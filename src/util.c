@@ -8,6 +8,7 @@
 #define _GNU_SOURCE 1
 #endif
 
+#include "compat.h"
 #include <limits.h>
 #include "vp.h"
 
@@ -254,11 +255,11 @@ int mkdir_p(const char *path)
     for (size_t i = 1; i < n; i++) {
         if (tmp[i] == '/') {
             tmp[i] = 0;
-            mkdir(tmp, 0755);
+            vp_mkdir_one(tmp);
             tmp[i] = '/';
         }
     }
-    int r = mkdir(tmp, 0755);
+    int r = vp_mkdir_one(tmp);
     free(tmp);
     return (r == 0 || errno == EEXIST) ? 0 : -1;
 }
@@ -352,7 +353,12 @@ char *replace_suffix(const char *path, const char *suffix)
 void vp_report_missing(const char *role, const char *path)
 {
     char abs[PATH_MAX];
+#ifdef VP_NO_REALPATH
+    /* MinGW has no realpath(); the fallback below is all we need here */
+    if (1) {
+#else
     if (!realpath(path, abs)) {
+#endif
         /* realpath fails when the file is absent - build the path by hand */
         char cwd[PATH_MAX];
         if (!getcwd(cwd, sizeof(cwd)))
@@ -444,8 +450,15 @@ static int g_cap_wfd = -1;
 static int g_saved_out = -1;
 static int g_saved_err = -1;
 static int g_cap_active = 0;
-static char *g_cap_dir = NULL;   /* optional fallback directory, usually unused */
+#if defined(_WIN32) || defined(_WIN64)
+static FILE *g_cap_file = NULL;  /* the scratch stream, read back in stop() */
+#endif
+static char *g_cap_dir = NULL;   /* Windows-only: where the scratch file goes */
 static char g_cap_why[256];
+#if defined(_WIN32) || defined(_WIN64)
+static char *g_cap_path = NULL;  /* name of the scratch file, deleted in stop() */
+static int g_cap_seq = 0;
+#endif
 
 void vp_capture_set_dir(const char *dir)
 {
@@ -490,7 +503,33 @@ int vp_capture_start(void)
     int fds[2];
     int got = 0;
 #if defined(_WIN32) || defined(_WIN64)
-    got = (_pipe(fds, 1 << 16, _O_BINARY) == 0);
+    /* _pipe() is not declared on every MinGW, so use a scratch file in the
+     * directory the caller supplied and redirect through its stream fd. */
+    if (g_cap_dir) {
+        free(g_cap_path);
+        g_cap_path = NULL;
+        size_t len = strlen(g_cap_dir) + 64;
+        g_cap_path = xmalloc(len);
+        snprintf(g_cap_path, len, "%s\\vp-cap-%ld-%d.tmp", g_cap_dir,
+                 (long)getpid(), g_cap_seq++);
+        FILE *f = fopen(g_cap_path, "w+b");
+        if (f) {
+            int fd = _fileno(f);
+            if (fd >= 0) {
+                fds[0] = fd;
+                fds[1] = dup(fd);
+                got = 1;
+                g_cap_file = f;   /* read back through the stream in stop() */
+            } else {
+                fclose(f);
+            }
+        }
+    }
+    if (!got) {
+        snprintf(g_cap_why, sizeof(g_cap_why),
+                 "Windows capture needs vp_capture_set_dir()");
+        return -1;
+    }
 #else
     got = (pipe(fds) == 0);
 #endif
@@ -570,10 +609,14 @@ char *vp_capture_stop(void)
             buf = nb;
         }
 #if defined(_WIN32) || defined(_WIN64)
-        int n = _read(g_cap_rfd, buf + len, (unsigned)(cap - len - 1));
+        /* read through the stream: no _read() declaration needed */
+        size_t n = g_cap_file ? fread(buf + len, 1, cap - len - 1, g_cap_file) : 0;
+        if (n == 0)
+            break;
+        len += n;
+        continue;
 #else
         ssize_t n = read(g_cap_rfd, buf + len, cap - len - 1);
-#endif
         if (n > 0) {
             len += n;
             continue;
@@ -583,10 +626,43 @@ char *vp_capture_stop(void)
         if (errno == EINTR)
             continue;
         break;
+#endif
     }
     buf[len] = 0;
     close(g_cap_rfd);
     g_cap_rfd = -1;
     g_cap_active = 0;
+#if defined(_WIN32) || defined(_WIN64)
+    if (g_cap_file) {
+        fclose(g_cap_file);
+        g_cap_file = NULL;
+    }
+    if (g_cap_path) {
+        remove(g_cap_path);
+        free(g_cap_path);
+        g_cap_path = NULL;
+    }
+#endif
     return buf;
+}
+
+/* Rejects a relative path that would escape its root: any ".." component, or
+ * an absolute path. Entry names in a cpio and "dest" values in a payload
+ * manifest are both supplied by other people, and veritpath's whole purpose is
+ * to process other people's images and payloads. */
+int vp_path_is_safe(const char *n)
+{
+    if (!n || !*n)
+        return 0;
+    if (*n == '/')
+        return 0;                 /* absolute: escapes any root we choose */
+    for (const char *p = n; *p;) {
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0'))
+            return 0;
+        while (*p && *p != '/')
+            p++;
+        if (*p == '/')
+            p++;
+    }
+    return 1;
 }

@@ -9,6 +9,7 @@
 #endif
 
 /* Counter-measure plan printing. */
+#include "compat.h"
 #include "vp.h"
 
 #include <stdlib.h>

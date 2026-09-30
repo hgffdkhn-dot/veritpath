@@ -58,6 +58,7 @@ void *vp_memmem(const void *hay, size_t haylen, const void *needle, size_t needl
 char *path_join(const char *a, const char *b);
 char *path_dirname(const char *path);
 int dir_in_path(const char *dir, const char *path);
+int vp_path_is_safe(const char *rel);   /* no "..", not absolute */
 
 /* run the CLI without process exit: for embedders (JNI, tests, other tools) */
 void vp_set_program_name(const char *name);
@@ -74,6 +75,33 @@ int vp_capture_start(void);
 char *vp_capture_stop(void);
 char *replace_suffix(const char *path, const char *suffix); /* stem + suffix */
 
+/* ----------------------------------------------------- platform shims
+ *
+ * MinGW is not POSIX. Four things are missing or different and each one was a
+ * real build failure on Windows:
+ *   mkdir()  - takes one argument only
+ *   S_ISLNK  - not declared (no symlinks in the Windows model)
+ *   memmem   - not provided by the CRT at all
+ *   realpath - not provided
+ * Add the missing pieces here so the rest of the sources stay plain POSIX.
+ */
+#if defined(_WIN32) || defined(_WIN64)
+#include <sys/stat.h>
+#ifndef S_ISLNK
+#define S_ISLNK(m) (0)          /* Windows has no symlinks in this sense */
+#endif
+#define VP_NO_REALPATH 1
+/* MinGW's mkdir() is deprecated (and a macro on some toolchains); _mkdir is
+ * the documented one-argument form. */
+#include <direct.h>
+static inline int vp_mkdir_one(const char *p)
+{
+    return _mkdir(p);
+}
+#else
+#define vp_mkdir_one(p) mkdir((p), 0755)
+#endif
+
 /* ---------------------------------------------------------- compression */
 
 typedef enum {
@@ -89,7 +117,8 @@ typedef enum {
 
 comp_fmt_t comp_detect(const uint8_t *data, size_t len);
 const char *comp_name(comp_fmt_t f);
-comp_fmt_t comp_from_name(const char *name);
+comp_fmt_t comp_from_name(const char *name);   /* -1 if unknown */
+const char *comp_known_names(void);   /* list for --format error messages */
 int comp_decompress(const uint8_t *in, size_t inlen, buf_t *out);
 int comp_compress(const uint8_t *in, size_t inlen, comp_fmt_t fmt, buf_t *out);
 /* decompress one chunk, tell how many input bytes it used */

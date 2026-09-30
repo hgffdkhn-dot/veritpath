@@ -90,14 +90,23 @@ build_one() {           # name, compiler, extra-flags, suffix
     local libs="$LIBS"
     if ! can_link_z "$cc" "$extra" "$libs"; then
         echo "  $name: no zlib for this target yet, trying to arrange one"
-        local z=""
+        local z="" inc="" lib=""
         z=$(provision_zlib "$cc" "$extra") || z=""
-        if [ -n "$z" ] && [ -f "$z" ]; then
+        case "$z" in
+            *:*) inc="${z%%:*}"; lib="${z#*:}" ;;
+            *)   lib="$z" ;;
+        esac
+        if [ -n "$lib" ] && [ -f "$lib" ]; then
             # link the archive directly: no -L guessing, no -l resolution
-            libs="$z"
-            echo "        using $z"
-        elif [ -n "$z" ]; then
-            libs="$LIBS"
+            libs="$lib"
+            # -I matters just as much - a target without zlib.h fails at
+            # compile time, not link time
+            if [ -n "$inc" ] && [ -f "$inc/zlib.h" ]; then
+                extra="$extra -I$inc"
+                echo "        using $lib (+ -I$inc)"
+            else
+                echo "        using $lib"
+            fi
         fi
     fi
     if ! can_link_z "$cc" "$extra" "$libs"; then

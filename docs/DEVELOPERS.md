@@ -175,6 +175,40 @@ fastboot flash init_boot out/init_boot.veritpath.img
 - `arch` 检测依赖 kernel（判断 `ARM64` 魔数）。`init_boot.img` 不带 kernel，
   单独给它时判不出架构，需要同时传 `boot.img`。
 
+
+## 处理不可信输入
+
+veritpath 的用途就是分析**别人提供**的镜像、注入**别人提供**的 payload，所以
+两者都当作不可信输入处理。
+
+**路径遍历（zip-slip）**：ramdisk 里的条目名可以是 `../../../../tmp/x`，解压时会
+逃出工作目录写到任意位置。veritpath 会拒绝任何含 `..` 分量的条目并告警：
+
+```
+! refusing an entry that escapes the output directory: ../../../../../../tmp/x
+```
+
+payload manifest 的 `dest` 同样受此约束，加载时就拒绝。
+
+**符号链接跟随**：先放一个指向外部的 symlink、再放一个同名文件，`fopen()` 会跟随
+链接写到外面。写入前会先 `unlink()` 掉该路径上的链接。
+
+symlink 的**目标**本身不受限制——Android ramdisk 里的 `/init -> /system/bin/init`
+是绝对路径，属于正常用法。
+
+## 参数校验
+
+数值参数不再静默吞错：
+
+| 输入 | 旧行为 | 现在 |
+|---|---|---|
+| `--header-version xyz` | 静默变 0，输出 `HEADER_VER:0`（错误结果，退出码 0） | 报错退出 1 |
+| `--segment abc` | 静默变 0 | 报错退出 1 |
+| `--segment 99`（越界） | 静默 clamp 到最后一段 | 报出实际段数，退出 1 |
+| `--format nosuchfmt` | 静默当 raw | 报错并列出可用格式 |
+
+`--format` 的可选值取决于编译时可用的压缩后端，报错信息里会实时列出。
+
 ## 九、集成到脚本时注意 `./`
 
 **部分安卓设备上裸敲 `veritpath` 是不认的**——当前目录通常不在 `PATH` 里，shell

@@ -233,3 +233,35 @@ single-threaded caller cannot deadlock.
 
 `setTempDir()` is now only a fallback for platforms without `pipe()`; you do not
 need to call it.
+
+### `unknown command: --init-boot`
+
+`Veritpath.analyze()` / `Veritpath.inject()` returning exit 1 with
+`unknown command: --init-boot`.
+
+**Cause:** `vp_cli_run` takes `argv[0]` as the sub-command. An earlier revision
+of the Java wrapper emitted the image flags first, producing:
+
+```
+["--init-boot", "/path", "inject", "-p", payload, "-o", out]
+```
+
+so `--init-boot` was taken as the command and rejected.
+
+**Fixed:** every call site now puts the command first (since 0.2.0):
+
+```
+["inject", "-p", payload, "-o", out, "--init-boot", "/path"]
+```
+
+If you assemble argv yourself, one rule: **the sub-command is `args[0]`**.
+
+```java
+Veritpath.run("analyze", "--brief", "--boot", bootPath);   // correct
+Veritpath.run("--boot", bootPath, "analyze");              // throws
+```
+
+Three layers now guard it: `run()` throws `IllegalArgumentException`; the JNI
+layer returns a diagnostic instead of silently running a different command; and
+`vp_cli_run` rejects an `argv[0]` starting with `-` (getopt used to permute that
+into another command — `analyze` quietly becoming `unpack`, for instance).

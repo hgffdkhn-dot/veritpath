@@ -9,6 +9,7 @@
 #endif
 
 /* Architecture / layout detection. */
+#include "compat.h"
 #include "vp.h"
 
 #include <stdlib.h>

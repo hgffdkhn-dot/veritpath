@@ -60,6 +60,19 @@ Java_dev_veritpath_Veritpath_nativeRun(JNIEnv *env, jclass cls, jobjectArray arg
     }
 
     int rc = 1;
+    /* argv[0] is the sub-command. A leading '-' means the caller built the
+     * array wrong (the image flags came first) - say so plainly instead of
+     * letting the CLI report a confusing "unknown command". */
+    if (built > 0 && c_argv[0] && c_argv[0][0] == '-') {
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+                 "veritpath: argv[0] must be the sub-command, got '%s'\n"
+                 "put the command first, e.g. Veritpath.run(\"analyze\", "
+                 "\"--boot\", path)\n", c_argv[0]);
+        set_last_output(xstrdup(msg));
+        goto done;
+    }
+
     if (vp_capture_start() == 0) {
         /* stdout and stderr both land here, so a failing command still has
          * something to report */
@@ -73,11 +86,13 @@ Java_dev_veritpath_Veritpath_nativeRun(JNIEnv *env, jclass cls, jobjectArray arg
         char msg[512];
         snprintf(msg, sizeof(msg),
                  "veritpath: output capture unavailable%s%s\n"
-                 "call Veritpath.setTempDir(context.getCacheDir().getAbsolutePath())\n",
+                 "pipe() failed on this platform; set a fallback directory with\n"
+                 "Veritpath.setTempDir(context.getCacheDir().getAbsolutePath())\n",
                  why ? ": " : "", why ? why : "");
         set_last_output(xstrdup(msg));
     }
 
+done:
     for (jsize i = 0; i < built; i++)
         free(c_argv[i]);
     free(c_argv);

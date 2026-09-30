@@ -203,6 +203,28 @@ if cc -O2 -std=c11 -DVP_NO_MAIN -Isrc -c src/util.c -o "$WORK/util.o" 2>/dev/nul
 else
     bad "sources compile without main() (library build)"
 fi
+# the Windows code paths must compile: mkdir() arity, S_ISLNK, memmem, realpath
+# are all places a POSIX-only build hides mistakes until someone runs MinGW
+if [ -f tools/check_windows.sh ]; then
+    if bash tools/check_windows.sh >"$WORK/win.log" 2>&1; then
+        ok "windows branch compiles cleanly"
+    else
+        bad "windows branch compiles cleanly"
+        sed 's/^/        /' "$WORK/win.log" | head -10
+    fi
+fi
+
+# the Windows code paths must compile: mkdir() arity, S_ISLNK, memmem, realpath
+# are all places a POSIX-only build hides mistakes until someone runs MinGW
+if [ -f tools/check_windows.sh ]; then
+    if bash tools/check_windows.sh >"$WORK/win.log" 2>&1; then
+        ok "windows branch compiles cleanly"
+    else
+        bad "windows branch compiles cleanly"
+        sed 's/^/        /' "$WORK/win.log" | head -10
+    fi
+fi
+
 # cross builds must skip cleanly when the target has no zlib, instead of
 # dying with a bare "cannot find -lz"
 if [ -f tools/ensure_zlib.sh ]; then
@@ -479,6 +501,128 @@ if python3 "$KIT" verify-frags "$WORK/uv.img" >/dev/null 2>&1; then
     ok "vendor fragments survive unpack/repack"
 else
     bad "vendor fragments survive unpack/repack"
+fi
+
+# --------------------------------------------- untrusted input must not escape
+echo "== path traversal"
+python3 "$KIT" evil "$WORK/evil" >/dev/null
+rm -f /veritpath_escape_test /veritpath_escape_pay 2>/dev/null || true
+"$BIN" unpack "$WORK/evil/traversal.img" -d "$WORK/evil/work" \
+    >"$WORK/ev.log" 2>&1 || true
+if [ -e /veritpath_escape_test ]; then
+    bad "a traversing cpio entry cannot escape the work dir"
+else
+    ok "a traversing cpio entry cannot escape the work dir"
+fi
+check "the escape attempt is reported" \
+    "$(grep -c 'escapes the output directory' "$WORK/ev.log")" "1"
+
+rm -f /veritpath_symlink_pwn 2>/dev/null || true
+"$BIN" unpack "$WORK/evil/symlink_escape.img" -d "$WORK/evil/sw" \
+    >/dev/null 2>&1 || true
+if [ -e /veritpath_symlink_pwn ]; then
+    bad "writing an entry does not follow a planted symlink"
+else
+    ok "writing an entry does not follow a planted symlink"
+fi
+# and the entry itself still lands, as a plain file
+if [ -f "$WORK/evil/sw/ramdisk/pwn" ] && [ ! -L "$WORK/evil/sw/ramdisk/pwn" ]; then
+    ok "the replacing entry is written as a plain file"
+else
+    bad "the replacing entry is written as a plain file"
+fi
+
+if "$BIN" payload-check "$WORK/evil/evilpayload" >"$WORK/ev2.log" 2>&1; then
+    bad "a traversing payload dest is rejected"
+else
+    ok "a traversing payload dest is rejected"
+fi
+check "payload escape is named" \
+    "$(grep -c 'escapes the ramdisk root' "$WORK/ev2.log")" "1"
+
+# ------------------------------------------------- numeric options are validated
+echo "== numeric options"
+for bad_opt in "--header-version xyz" "--header-version 99" "--format nosuchfmt"; do
+    if "$BIN" analyze --brief --boot "$WORK/img/boot.img" $bad_opt \
+            >"$WORK/num.log" 2>&1; then
+        bad "analyze $bad_opt is rejected"
+    else
+        ok "analyze $bad_opt is rejected"
+    fi
+done
+if "$BIN" inject --init-boot "$WORK/img/init_boot.img" -p "$PAY" \
+        --segment abc -o "$WORK/seg1" >"$WORK/num.log" 2>&1; then
+    bad "inject --segment abc is rejected"
+else
+    ok "inject --segment abc is rejected"
+fi
+if "$BIN" inject --vendor-boot "$WORK/img/vendor_boot.img" -p "$PAY" \
+        --segment 99 -o "$WORK/seg2" >"$WORK/num.log" 2>&1; then
+    bad "inject --segment 99 (out of range) is rejected"
+else
+    ok "inject --segment 99 (out of range) is rejected"
+fi
+check "out-of-range segment names the count" \
+    "$(grep -c 'out of range' "$WORK/num.log")" "1"
+# a valid one still works
+if "$BIN" inject --vendor-boot "$WORK/img/vendor_boot.img" -p "$PAY" \
+        --segment 1 -o "$WORK/seg3" >/dev/null 2>&1; then
+    ok "a valid --segment still works"
+else
+    bad "a valid --segment still works"
+fi
+
+# --------------------------------------------- untrusted input must not escape
+echo "== path traversal"
+python3 "$KIT" evil "$WORK/evil" >/dev/null
+rm -f /veritpath_escape_test /veritpath_escape_pay 2>/dev/null
+"$BIN" unpack "$WORK/evil/traversal.img" -d "$WORK/evil/work" >"$WORK/ev.log" 2>&1
+if [ -e /veritpath_escape_test ]; then
+    bad "a traversing cpio entry cannot escape the work dir"
+else
+    ok "a traversing cpio entry cannot escape the work dir"
+fi
+check "the escape attempt is reported" \
+    "$(grep -c 'escapes the output directory' "$WORK/ev.log")" "1"
+
+if "$BIN" payload-check "$WORK/evil/evilpayload" >"$WORK/ev2.log" 2>&1; then
+    bad "a traversing payload dest is rejected"
+else
+    ok "a traversing payload dest is rejected"
+fi
+check "payload escape is named" \
+    "$(grep -c 'escapes the ramdisk root' "$WORK/ev2.log")" "1"
+
+# ------------------------------------------------- numeric options are validated
+echo "== numeric options"
+for bad_opt in "--header-version xyz" "--header-version 99" "--format nosuchfmt"; do
+    if "$BIN" analyze --brief --boot "$WORK/img/boot.img" $bad_opt \
+            >"$WORK/num.log" 2>&1; then
+        bad "analyze $bad_opt is rejected"
+    else
+        ok "analyze $bad_opt is rejected"
+    fi
+done
+if "$BIN" inject --init-boot "$WORK/img/init_boot.img" -p "$PAY" \
+        --segment abc -o "$WORK/seg1" >"$WORK/num.log" 2>&1; then
+    bad "inject --segment abc is rejected"
+else
+    ok "inject --segment abc is rejected"
+fi
+if "$BIN" inject --vendor-boot "$WORK/img/vendor_boot.img" -p "$PAY" \
+        --segment 99 -o "$WORK/seg2" >"$WORK/num.log" 2>&1; then
+    bad "inject --segment 99 (out of range) is rejected"
+else
+    ok "inject --segment 99 (out of range) is rejected"
+fi
+check "out-of-range segment names the count" \
+    "$(grep -c 'out of range' "$WORK/num.log")" "1"
+# a valid one still works
+if "$BIN" inject --vendor-boot "$WORK/img/vendor_boot.img" -p "$PAY" \
+        --segment 1 -o "$WORK/seg3" >/dev/null 2>&1; then
+    ok "a valid --segment still works"
+else
+    bad "a valid --segment still works"
 fi
 
 # ------------------------------------------------------------------ errors

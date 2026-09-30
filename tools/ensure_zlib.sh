@@ -3,7 +3,7 @@
 #
 #   bash tools/ensure_zlib.sh aarch64-linux-gnu-gcc
 #
-# Prints the absolute path of a libz.a on success (nothing else), and exits
+# Prints "<incdir>:<libz.a>" on success, and exits
 # non-zero if none could be arranged.
 #
 # Order of attempts:
@@ -40,12 +40,11 @@ probe() {   # $1 = extra libs to try
     $cc $extra "$t" -o "$b" $1 >/dev/null 2>&1
 }
 
-# 1. already fine?
+# 1. already fine? Then the compiler's own zlib works and no extra flags are
+#    needed - tell the caller so it stops looking.
 if probe "-lz"; then
-    # find it so callers can link the archive directly
-    p=$($cc $extra -print-file-name=libz.a 2>/dev/null)
-    if [ -f "$p" ]; then echo "$p"; exit 0; fi
-    echo "builtin"; exit 0
+    echo "builtin:builtin"
+    exit 0
 fi
 
 # 2. apt multi-arch (best effort)
@@ -64,9 +63,8 @@ if [ "$debarch" != none ] && command -v apt-get >/dev/null 2>&1 &&
     ${SUDO} apt-get update -qq >/dev/null 2>&1 || true   # 404s here are not fatal
     ${SUDO} apt-get install -y -qq "zlib1g-dev:$debarch" >/dev/null 2>&1 || true
     if probe "-lz"; then
-        p=$($cc $extra -print-file-name=libz.a 2>/dev/null)
-        if [ -f "$p" ]; then echo "$p"; exit 0; fi
-        echo "builtin"; exit 0
+        echo "builtin:builtin"
+        exit 0
     fi
 fi
 
@@ -75,7 +73,7 @@ ver=1.3.1
 tarball="$work/zlib-$ver.tar.gz"
 src="$work/zlib-$ver"
 prefix="$work/prefix"
-[ -f "$prefix/lib/libz.a" ] && { echo "$prefix/lib/libz.a"; exit 0; }
+[ -f "$prefix/lib/libz.a" ] && { echo "$prefix/include:$prefix/lib/libz.a"; exit 0; }
 
 if [ ! -d "$src" ]; then
     url="https://github.com/madler/zlib/releases/download/v${ver}/zlib-${ver}.tar.gz"
@@ -95,4 +93,4 @@ fi
   make install >"$work/install.log" 2>&1 ) || exit 1
 
 [ -f "$prefix/lib/libz.a" ] || exit 1
-echo "$prefix/lib/libz.a"
+echo "$prefix/include:$prefix/lib/libz.a"
